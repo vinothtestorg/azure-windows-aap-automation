@@ -1,0 +1,7 @@
+---
+- name: Check connectivity to Windows web hosts
+  hosts: windows_web
+  gather_facts: false
+  tasks:
+    - name: Ping over PSRP
+      ansible.windows.win_ping:

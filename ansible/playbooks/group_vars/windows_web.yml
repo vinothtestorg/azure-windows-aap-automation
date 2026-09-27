@@ -1,0 +1,6 @@
+---
+ansible_connection: psrp
+ansible_port: 5986
+ansible_psrp_protocol: https
+ansible_psrp_auth: ntlm
+ansible_psrp_cert_validation: ignore   # PoC only: self-signed listener certificate (HLD risk K2)

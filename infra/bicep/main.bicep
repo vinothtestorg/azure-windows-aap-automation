@@ -70,9 +70,44 @@ module ghDeployerNexusSecretReader 'modules/secret-reader.bicep' = if (deployCom
 
 // Compute (Tasks 4 and 5)
 
+resource kvRef 'Microsoft.KeyVault/vaults@2023-07-01' existing = { name: kvName }
+
+module appVm 'modules/vm-windows.bicep' = if (deployCompute) {
+  name: 'app-vm'
+  params: {
+    location: location
+    tags: union(commonTags, { app: 'demoapp' })
+    subnetId: network.outputs.appSubnetId
+    adminPassword: kvRef.getSecret('vm-admin-password')
+    ansiblePassword: kvRef.getSecret('ansible-svc-password')
+  }
+}
+
+// Task 5's Nexus deployer reads the app VM's automation credential too, so the
+// app VM's own identity only needs read access to the Nexus reader secret it
+// consumes at configuration time.
+module appVmSecret 'modules/secret-reader.bicep' = if (deployCompute) {
+  name: 'app-vm-nexus-reader-secret'
+  params: {
+    vaultName: keyvault.outputs.name
+    secretName: 'nexus-reader-password'
+    // ARM's if() short-circuits, so appVm.outputs is never actually read when
+    // deployCompute is false; BCP318 cannot see that the ternary and the
+    // module's own condition are the same expression.
+    #disable-next-line BCP318
+    principalId: deployCompute ? appVm.outputs.principalId : ''
+    principalType: 'ServicePrincipal'
+  }
+}
+
 output keyVaultName string = keyvault.outputs.name
 output keyVaultUri string = keyvault.outputs.uri
 output ghDeployerClientId string = identity.outputs.clientId
 output ghDeployerPrincipalId string = identity.outputs.principalId
 output appSubnetId string = network.outputs.appSubnetId
 output toolsSubnetId string = network.outputs.toolsSubnetId
+// Same BCP318 false positive as above: guarded by the identical deployCompute condition.
+#disable-next-line BCP318
+output appVmFqdn string = deployCompute ? appVm.outputs.fqdn : ''
+#disable-next-line BCP318
+output appVmPrincipalId string = deployCompute ? appVm.outputs.principalId : ''
