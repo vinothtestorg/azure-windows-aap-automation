@@ -4,3 +4,10 @@
 
 # Python virtualenv
 venv/
+
+# .NET build output
+bin/
+obj/
+out/
+*.user
+TestResults/
