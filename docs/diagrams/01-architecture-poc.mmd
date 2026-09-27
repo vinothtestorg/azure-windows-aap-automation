@@ -1,0 +1,50 @@
+flowchart TB
+  dev(["Developer"]) -->|"git push / PR"| repo
+  users(["App users"]) -->|"HTTP 80"| pip
+
+  subgraph gh["GitHub (public repo)"]
+    repo[("Repo<br/>azure-windows-aap-automation")]
+    ci["Actions: ci.yml<br/>windows-2022 runner<br/>msbuild, vstest, zip + sha256"]
+    cd["Actions: cd.yml<br/>environment: poc"]
+    repo --> ci --> cd
+  end
+
+  subgraph aap["Red Hat AAP Developer Sandbox (PoC, OpenShift on AWS us-east-1)"]
+    api["Platform gateway<br/>/api/controller/v2/"]
+    jt["Job template<br/>winapp-deploy"]
+    proj["Project<br/>public GitHub repo, no SCM credential"]
+    inv["Inventory azure-windows-poc<br/>Azure RM source, tag app=demoapp"]
+    ee["Execution environment<br/>ansible.windows + pypsrp"]
+    api --> jt --> ee
+    proj --> jt
+    inv --> jt
+  end
+
+  subgraph az["Azure subscription 03b6c75f-a3f1-429f-ab89-0f9b07087638, region East US"]
+    subgraph entra["Microsoft Entra ID"]
+      uami["UAMI id-gh-deployer<br/>federated credential: GitHub OIDC"]
+      sp["SP sp-aap-poc<br/>(PoC fallback)"]
+    end
+    subgraph rg["Resource group rg-winapp-poc"]
+      kv["Key Vault kv-winapp-poc<br/>Nexus, ansible_svc, admin secrets"]
+      subgraph vnet["VNet vnet-winapp-poc"]
+        subgraph snapp["snet-app + NSG"]
+          pip["Public IP + DNS label"]
+          vm["vm-winapp-01<br/>Windows Server 2022, IIS + DemoApp<br/>system-assigned MI<br/>PSRP over HTTPS 5986"]
+        end
+        subgraph sntools["snet-tools + NSG"]
+          nexus[("vm-nexus-01<br/>Nexus Repository CE + Caddy TLS<br/>raw repo demoapp-releases")]
+        end
+      end
+    end
+  end
+
+  cd -->|"1. OIDC token exchange"| uami
+  cd -->|"2. read nexus-deployer-password<br/>as UAMI"| kv
+  cd -->|"3. PUT zip + sha256<br/>as svc-gh-deployer"| nexus
+  cd -->|"4. launch JT + extra_vars<br/>gateway OAuth token"| api
+  inv -.->|"inventory sync as SP<br/>Reader on RG"| sp
+  jt -.->|"ansible-svc-password lookup as SP"| kv
+  ee -->|"5. PSRP HTTPS 5986<br/>NTLM, ansible_svc"| pip --> vm
+  vm -->|"6. read nexus-reader-password<br/>as VM MI"| kv
+  vm -->|"7. GET zip<br/>as svc-win-reader"| nexus

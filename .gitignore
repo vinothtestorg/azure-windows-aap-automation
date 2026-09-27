@@ -1,0 +1,6 @@
+# Local AAP connection settings (TOWER_HOST, TOWER_OAUTH_TOKEN, AWXKIT_API_BASE_PATH)
+.env.aap
+.env*
+
+# Python virtualenv
+venv/
