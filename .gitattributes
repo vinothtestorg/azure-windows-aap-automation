@@ -1,0 +1,5 @@
+# Normalise line endings: shell scripts, cloud-init and YAML break with CRLF
+* text=auto eol=lf
+*.svg binary
+*.png binary
+*.zip binary

@@ -1,0 +1,57 @@
+flowchart TB
+  dev(["Developer"]) -->|"git push"| repo
+  users(["App users"]) -->|"HTTPS 443"| agwapp
+
+  subgraph gh["GitHub org vinothtestorg"]
+    repo[("Repo azure-windows-aap-automation")]
+    wf["Actions: ci.yml + cd.yml"]
+    repo --> wf
+  end
+
+  orgnx[("Sonatype Nexus Repository Cloud (SaaS)<br/>nexus.example.com (placeholder)<br/>IP Allow List")]
+
+  subgraph az["Azure East US"]
+    subgraph hub["Hub VNet"]
+      runner["Self-hosted runner<br/>UAMI id-gh-deployer"]
+      subgraph aapaz["AAP 2.7 container enterprise topology, RHEL VMs, zones 1 and 2"]
+        ilb["Internal Load Balancer, TCP 443<br/>aap.example.com (placeholder)"]
+        gw["Platform gateway x2<br/>+ Redis"]
+        ctl["Automation controller x2<br/>UAMI id-aap-exec"]
+        ahub["Private automation hub x2<br/>+ Redis"]
+        eda["Event-Driven Ansible x2<br/>+ Redis"]
+        met["Metrics service x1"]
+        hop["Hop node x1<br/>remote segments"]
+        exe["Execution nodes x2<br/>UAMI id-aap-exec"]
+        pg[("Azure Database for PostgreSQL<br/>Flexible Server, zone-redundant HA")]
+        hubblob[("Blob storage<br/>hub content")]
+        ilb --> gw
+        gw --> ctl
+        gw --> ahub
+        gw --> eda
+        gw --> met
+        ctl -->|"receptor 27199"| exe
+        ctl -->|"receptor 27199"| hop
+        ahub --> hubblob
+        gw & ctl & ahub & eda & met -->|"5432"| pg
+      end
+    end
+    subgraph spoke["App VNet (peered)"]
+      agwapp["App Gateway / Load Balancer<br/>public 443"]
+      vm["Windows VM<br/>no public IP<br/>system-assigned MI"]
+      agwapp --> vm
+    end
+    kv["Key Vault<br/>private endpoint"]
+    nat["NAT Gateway<br/>static egress IP"]
+    arm["Azure Resource Manager"]
+  end
+
+  wf -->|"runs-on: self-hosted"| runner
+  runner -->|"MI: Nexus deploy secret"| kv
+  runner -->|"upload, user token"| nat
+  runner -->|"launch JT"| ilb
+  ctl -->|"MI: ansible_svc secret lookup"| kv
+  exe -->|"MI: Reader, inventory sync"| arm
+  exe -->|"PSRP HTTPS 5986, private IP<br/>cert validation on"| vm
+  vm -->|"MI: Nexus read secret"| kv
+  vm -->|"download, user token"| nat
+  nat -->|"HTTPS 443"| orgnx

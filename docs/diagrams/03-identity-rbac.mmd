@@ -1,0 +1,52 @@
+flowchart LR
+  subgraph P["Principals"]
+    ghwf["GitHub Actions workflow<br/>environment poc, branch main"]
+    uami["UAMI id-gh-deployer<br/>federated credential"]
+    vmmi["VM system-assigned MI"]
+    sp["SP sp-aap-poc<br/>PoC fallback"]
+    aapmi["UAMI id-aap-exec<br/>target: AAP on Azure"]
+    aapu["AAP user svc-github-cd<br/>gateway OAuth token, write scope"]
+    ans["Local user ansible_svc"]
+  end
+
+  subgraph AZ["Azure RBAC scopes"]
+    k1["Secret nexus-deployer-password<br/>(Nexus user svc-gh-deployer)"]
+    k2["Secret nexus-reader-password<br/>(Nexus user svc-win-reader)"]
+    k3["Secret ansible-svc-password<br/>(local user ansible_svc)"]
+    rg["Resource group rg-winapp-poc"]
+  end
+
+  subgraph NX["Nexus RBAC, repo demoapp-releases"]
+    nxd["User svc-gh-deployer"]
+    nxr["User svc-win-reader"]
+    n1["Role demoapp-deployer<br/>add, edit, read, browse"]
+    n2["Role demoapp-reader<br/>read, browse"]
+  end
+
+  subgraph A["AAP RBAC, org winapp-poc"]
+    a1["Execute: job template winapp-deploy"]
+    a2["Use: inventory azure-windows-poc"]
+  end
+
+  subgraph W["Windows VM local"]
+    w1["Administrators group"]
+  end
+
+  ghwf -->|"OIDC exchange"| uami
+  uami -->|"Key Vault Secrets User"| k1
+  vmmi -->|"Key Vault Secrets User"| k2
+  sp -->|"Key Vault Secrets User"| k3
+  sp -->|"Reader"| rg
+  aapmi -.->|"replaces SP"| k3
+  aapmi -.->|"replaces SP"| rg
+  nxd --> n1
+  nxr --> n2
+  aapu --> a1
+  aapu --> a2
+  ans --> w1
+
+  classDef target stroke-dasharray: 5 5
+  classDef fallback stroke-width:3px
+  class aapmi target
+  class sp fallback
+  linkStyle 5,6 stroke-dasharray: 5 5

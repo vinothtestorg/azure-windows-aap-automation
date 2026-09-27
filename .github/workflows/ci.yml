@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [main, 'poc/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      git_sha: ${{ steps.meta.outputs.git_sha }}
+      package_name: ${{ steps.package.outputs.package_name }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version
+        id: meta
+        shell: pwsh
+        run: |
+          $sha7 = "${{ github.sha }}".Substring(0, 7)
+          "version=1.0.${{ github.run_number }}" >> $env:GITHUB_OUTPUT
+          "git_sha=$sha7" >> $env:GITHUB_OUTPUT
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build (msbuild)
+        run: msbuild src/DemoApp.sln /restore /p:Configuration=Release /v:minimal
+
+      - name: Test
+        run: dotnet test src/DemoApp.Tests/DemoApp.Tests.csproj -c Release --no-build --no-restore --logger "trx;LogFileName=results.trx" --results-directory TestResults
+
+      # DeployOnBuild on this runner does not perform the FileSystem copy to PublishUrl
+      # (it stages under obj/ and only emits an MSDeploy package zip there), so
+      # WebPublishMethod=FileSystem/PublishUrl would be inert here. Pointing
+      # _PackageTempDir at out/ instead makes the pipeline's file-collection phase
+      # (which always runs, regardless of which publish method gets dispatched
+      # afterward) stage the site — Web.config, Global.asax, bin/DemoApp.dll, etc. —
+      # straight into out/. If this staging ever regresses, the missing-file guard in
+      # the next step fails the build rather than packaging incomplete output.
+      - name: Publish web app
+        run: msbuild src/DemoApp/DemoApp.csproj /restore /p:Configuration=Release /p:DeployOnBuild=true /p:_PackageTempDir=${{ github.workspace }}\out /p:DeleteExistingFiles=true /v:minimal
+
+      - name: Stamp version and package
+        id: package
+        shell: pwsh
+        run: |
+          $version = "${{ steps.meta.outputs.version }}"
+          $sha7 = "${{ steps.meta.outputs.git_sha }}"
+          $out = Join-Path $env:GITHUB_WORKSPACE 'out'
+          foreach ($required in 'Web.config', 'Global.asax', 'bin\DemoApp.dll') {
+            if (-not (Test-Path (Join-Path $out $required))) { throw "Publish output is missing $required" }
+          }
+          @{ version = $version; gitSha = $sha7 } | ConvertTo-Json -Compress | Set-Content -Path (Join-Path $out 'version.json') -Encoding ascii -NoNewline
+          $name = "DemoApp-$version-$sha7.zip"
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Compress-Archive -Path (Join-Path $out '*') -DestinationPath (Join-Path $dist $name)
+          $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist $name)).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -Path (Join-Path $dist "$name.sha256") -Encoding ascii -NoNewline
+          "package_name=$name" >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: demoapp-package
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: TestResults/
+          if-no-files-found: warn

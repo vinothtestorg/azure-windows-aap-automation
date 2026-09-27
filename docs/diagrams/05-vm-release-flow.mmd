@@ -1,0 +1,17 @@
+flowchart TD
+  start(["Job start"]) --> val{"extra_vars valid?<br/>artifact_url under Nexus demoapp-releases"}
+  val -- no --> failv(["Fail job, no change"])
+  val -- yes --> pre["Ensure IIS features, app pool DemoAppPool, site DemoApp<br/>site path = C:\inetpub\demoapp\current"]
+  pre --> have{"releases\{version} already present?"}
+  have -- yes --> rec
+  have -- no --> dl["IMDS token (system MI), read nexus-reader-password from Key Vault<br/>download zip + sha256 from Nexus to staging"]
+  dl --> sum{"sha256 matches?"}
+  sum -- no --> failx(["Fail job, no change"])
+  sum -- yes --> unz["Unzip to releases\{version}"]
+  unz --> rec["Record current junction target as previous"]
+  rec --> stop["Stop app pool"]
+  stop --> swap["Repoint junction: current = releases\{version}"]
+  swap --> startp["Start app pool"]
+  startp --> hc{"/health = 200 and<br/>/version = app_version?<br/>retries 10 x 6s"}
+  hc -- yes --> prune["Prune: keep last 5 releases"] --> ok(["Job successful"])
+  hc -- no --> rb["Rescue: junction back to previous<br/>recycle app pool"] --> failr(["Fail job, rolled back"])

@@ -1,0 +1,39 @@
+sequenceDiagram
+  autonumber
+  actor Dev as Developer
+  participant GH as GitHub Actions
+  participant Entra as Entra ID
+  participant KV as Key Vault
+  participant NX as Nexus (demoapp-releases)
+  participant AAP as AAP (gateway + controller)
+  participant VM as Windows VM (IIS)
+
+  Dev->>GH: push to main (PR runs CI only)
+  GH->>GH: ci.yml: nuget restore, msbuild Release, vstest
+  GH->>GH: zip DemoApp-{version}-{sha}.zip + sha256, upload-artifact
+  GH->>Entra: OIDC token, subject repo:vinothtestorg/azure-windows-aap-automation:environment:poc
+  Entra-->>GH: access token for UAMI id-gh-deployer
+  GH->>KV: get secret nexus-deployer-password
+  GH->>NX: PUT zip and .sha256 as svc-gh-deployer
+  GH->>AAP: POST /api/controller/v2/job_templates/{id}/launch/ with extra_vars
+  AAP-->>GH: job id
+  Note over GH,AAP: cd.yml polls /api/controller/v2/jobs/{id}/ until finished
+  AAP->>AAP: project sync (public GitHub), inventory sync (Azure RM as SP)
+  AAP->>KV: SP reads ansible-svc-password (credential lookup)
+  AAP->>VM: PSRP over HTTPS 5986 as ansible_svc
+  VM->>VM: validate extra_vars, ensure IIS features, pool, site
+  VM->>Entra: IMDS token for system-assigned MI
+  VM->>KV: get secret nexus-reader-password
+  VM->>NX: GET zip as svc-win-reader
+  NX-->>VM: zip
+  VM->>VM: verify sha256, unzip to releases\{version}
+  VM->>VM: stop pool, repoint current junction, start pool
+  VM->>VM: GET /health and /version
+  alt healthy and version matches
+    AAP-->>GH: job successful
+    GH->>GH: step summary: version, Nexus URL, AAP job URL
+  else unhealthy
+    VM->>VM: rescue: junction back to previous release, recycle pool
+    AAP-->>GH: job failed
+    GH->>GH: workflow fails
+  end
