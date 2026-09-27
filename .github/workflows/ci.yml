@@ -38,7 +38,7 @@ jobs:
         run: dotnet test src/DemoApp.Tests/DemoApp.Tests.csproj -c Release --no-build --no-restore --logger "trx;LogFileName=results.trx" --results-directory TestResults
 
       - name: Publish web app
-        run: msbuild src/DemoApp/DemoApp.csproj /restore /p:Configuration=Release /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:PublishUrl=${{ github.workspace }}\out /p:DeleteExistingFiles=true /v:minimal
+        run: msbuild src/DemoApp/DemoApp.csproj /restore /p:Configuration=Release /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:PublishUrl=${{ github.workspace }}\out /p:_PackageTempDir=${{ github.workspace }}\out /p:DeleteExistingFiles=true /v:minimal
 
       - name: Stamp version and package
         id: package
