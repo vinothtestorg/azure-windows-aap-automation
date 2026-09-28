@@ -13,6 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.meta.outputs.version }}
       git_sha: ${{ steps.meta.outputs.git_sha }}
@@ -81,3 +82,17 @@ jobs:
           name: test-results
           path: TestResults/
           if-no-files-found: warn
+
+  cd:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/cd.yml
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      version: ${{ needs.build.outputs.version }}
+      package_name: ${{ needs.build.outputs.package_name }}
+      sha256: ${{ needs.build.outputs.sha256 }}
+      git_sha: ${{ needs.build.outputs.git_sha }}
+    secrets: inherit
