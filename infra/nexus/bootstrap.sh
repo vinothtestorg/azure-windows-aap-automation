@@ -8,7 +8,10 @@ set -euo pipefail
 source "$(git rev-parse --show-toplevel)/infra/scripts/lib.sh"
 
 url="https://nexus-winapp-poc.eastus.cloudapp.azure.com"
-kv="$(kv_name)"
+if ! kv="$(kv_name)"; then
+  log "timed out or failed reading Key Vault name"
+  exit 1
+fi
 
 # Each Key Vault read runs under a 120s hard timeout and its status is
 # checked explicitly (rather than relying on `set -e`, which a failed

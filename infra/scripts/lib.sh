@@ -36,7 +36,7 @@ require_az_login() {
 }
 
 kv_name() {
-  az deployment group show -g "$RESOURCE_GROUP" -n "$DEPLOYMENT_NAME" \
+  with_timeout 120 az deployment group show -g "$RESOURCE_GROUP" -n "$DEPLOYMENT_NAME" \
     --query properties.outputs.keyVaultName.value -o tsv
 }
 
