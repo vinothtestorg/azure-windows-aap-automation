@@ -10,9 +10,22 @@ source "$(git rev-parse --show-toplevel)/infra/scripts/lib.sh"
 url="https://nexus-winapp-poc.eastus.cloudapp.azure.com"
 kv="$(kv_name)"
 
-nexus_admin="$(az keyvault secret show --vault-name "$kv" -n nexus-admin-password --query value -o tsv)"
-nexus_deployer="$(az keyvault secret show --vault-name "$kv" -n nexus-deployer-password --query value -o tsv)"
-nexus_reader="$(az keyvault secret show --vault-name "$kv" -n nexus-reader-password --query value -o tsv)"
+# Each Key Vault read runs under a 120s hard timeout and its status is
+# checked explicitly (rather than relying on `set -e`, which a failed
+# command-substitution assignment alone does not trigger), exiting with a
+# clear message on timeout or any other az failure.
+if ! nexus_admin="$(with_timeout 120 az keyvault secret show --vault-name "$kv" -n nexus-admin-password --query value -o tsv)"; then
+  log "failed to read secret nexus-admin-password from Key Vault (timeout or az error)"
+  exit 1
+fi
+if ! nexus_deployer="$(with_timeout 120 az keyvault secret show --vault-name "$kv" -n nexus-deployer-password --query value -o tsv)"; then
+  log "failed to read secret nexus-deployer-password from Key Vault (timeout or az error)"
+  exit 1
+fi
+if ! nexus_reader="$(with_timeout 120 az keyvault secret show --vault-name "$kv" -n nexus-reader-password --query value -o tsv)"; then
+  log "failed to read secret nexus-reader-password from Key Vault (timeout or az error)"
+  exit 1
+fi
 
 # --- helpers -----------------------------------------------------------
 # api_get PATH: sets REPLY_CODE and REPLY_BODY, never aborts the script.
@@ -56,9 +69,17 @@ echo "ok wait-writable"
 # Nexus writes a random initial password to /nexus-data/admin.password on
 # first start and clears the on-disk marker once the admin password is
 # actually changed away from it, so on a second run this is normally empty.
-init="$(az vm run-command invoke -g "$RESOURCE_GROUP" -n vm-nexus-01 --command-id RunShellScript \
+# The run-command call is captured and status-checked separately from the
+# text-processing pipeline below: piping it directly into sed/tr would let
+# `pipefail` see sed/tr's exit code (near-always 0) instead of a timeout.
+raw=""
+if ! raw="$(with_timeout 180 az vm run-command invoke -g "$RESOURCE_GROUP" -n vm-nexus-01 --command-id RunShellScript \
   --scripts 'cat /nexus-data/admin.password 2>/dev/null || true' \
-  --query 'value[0].message' -o tsv | sed -n '/\[stdout\]/,/\[stderr\]/p' | sed '1d;$d' | tr -d '[:space:]')"
+  --query 'value[0].message' -o tsv)"; then
+  log "failed to read the initial admin password from vm-nexus-01 (timeout or az error)"
+  exit 1
+fi
+init="$(printf '%s' "$raw" | sed -n '/\[stdout\]/,/\[stderr\]/p' | sed '1d;$d' | tr -d '[:space:]')"
 
 if [[ -n "$init" ]]; then
   tmp="$(mktemp)"
