@@ -76,7 +76,7 @@ module appVm 'modules/vm-windows.bicep' = if (deployCompute) {
   name: 'app-vm'
   params: {
     location: location
-    tags: union(commonTags, { app: 'demoapp' })
+    tags: commonTags
     subnetId: network.outputs.appSubnetId
     adminPassword: kvRef.getSecret('vm-admin-password')
     ansiblePassword: kvRef.getSecret('ansible-svc-password')

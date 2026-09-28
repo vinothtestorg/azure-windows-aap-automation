@@ -31,6 +31,10 @@ param dnsLabel string = 'winapp-poc'
 @description('Daily auto-shutdown time in 24h HHmm, UTC.')
 param shutdownTimeUtc string = '1800'
 
+// Only the VM itself carries app=demoapp; the PIP, NIC and shutdown schedule
+// keep the plain (env-only) tags passed in.
+var vmTags = union(tags, { app: 'demoapp' })
+
 resource pip 'Microsoft.Network/publicIPAddresses@2024-05-01' = {
   name: 'pip-winapp-vm'
   location: location
@@ -65,7 +69,7 @@ resource nic 'Microsoft.Network/networkInterfaces@2024-05-01' = {
 resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
   name: 'vm-winapp-01'
   location: location
-  tags: tags
+  tags: vmTags
   identity: {
     type: 'SystemAssigned'
   }
