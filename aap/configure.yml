@@ -12,8 +12,11 @@
 #   set -a; . ./.env.aap; set +a
 #   ansible-playbook aap/configure.yml -e aap_project_branch=poc/implementation
 #
-# All tasks are tagged `base`. Task 8 (winapp-deploy) will add `deploy`-tagged
-# tasks to this same play.
+# Most tasks are tagged `base`; the winapp-deploy job template and its
+# svc-github-cd role assignment (Task 8) are tagged `deploy` and can be
+# applied on their own with `--tags deploy` (the two bootstrap fact tasks
+# above are tagged `[base, deploy]` so either tag set still resolves the Key
+# Vault name first).
 - name: Configure AAP objects for the Azure Windows PoC
   hosts: localhost
   connection: local
@@ -252,3 +255,33 @@
         ask_limit_on_launch: true
         state: present
       tags: base
+
+    # --- 14. Job template: winapp-deploy (Task 8). Prompts on launch for
+    # both extra vars (app_version/artifact_url/artifact_sha256/git_sha -
+    # demoapp_deploy's Global Constraints) and --limit, never runs two
+    # deploys concurrently, and is bounded to 30 minutes server-side.
+    - name: Ensure job template winapp-deploy exists
+      ansible.controller.job_template:
+        name: "{{ aap_jt_deploy }}"
+        organization: "{{ aap_org }}"
+        project: "{{ aap_project_name }}"
+        playbook: ansible/playbooks/deploy.yml
+        inventory: "{{ aap_inventory }}"
+        credentials:
+          - "{{ aap_cred_machine }}"
+        ask_variables_on_launch: true
+        ask_limit_on_launch: true
+        allow_simultaneous: false
+        timeout: 1800
+        state: present
+      register: _jt_deploy
+      tags: deploy
+
+    # --- 15. Role assignment: JobTemplate Execute on winapp-deploy for svc-github-cd
+    - name: Assign JobTemplate Execute role on winapp-deploy to svc-github-cd
+      ansible.controller.role_user_assignment:
+        role_definition: "JobTemplate Execute"
+        object_id: "{{ _jt_deploy.id }}"
+        user: "{{ aap_cd_user }}"
+        state: present
+      tags: deploy

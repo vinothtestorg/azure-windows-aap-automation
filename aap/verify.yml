@@ -124,3 +124,87 @@
           - "windows_web hosts: {{ _windows_web_hosts }}"
           - "winapp-ping job {{ _ping_job.id }}: {{ _ping_job.status }}"
       tags: base
+
+    # --- winapp-deploy (Task 8). Launches with the app_version/artifact_url/
+    # artifact_sha256/git_sha extra vars passed on the command line (see
+    # aap/README.md / the run command below - ansible/tests/deploy-scenarios.sh
+    # --prepare-only uploads one fresh good version and prints exactly these
+    # four as JSON for `-e @<(...)`), then fetches the job's own stdout from
+    # the controller API to prove the Nexus reader password (read on the VM
+    # via win_powershell no_log, never by this playbook) never reached job
+    # output either.
+    #
+    #   set -a; . ./.env.aap; set +a
+    #   git push
+    #   ansible-playbook aap/verify.yml --tags deploy -e @<(bash ansible/tests/deploy-scenarios.sh --prepare-only)
+    - name: Resolve Key Vault name with a bounded timeout
+      ansible.builtin.command:
+        cmd: >-
+          bash -c 'source infra/scripts/lib.sh; with_timeout 120 az deployment group show
+          -g {{ azure_resource_group }} -n main --query properties.outputs.keyVaultName.value -o tsv'
+        chdir: "{{ playbook_dir }}/.."
+      register: _kv_name
+      changed_when: false
+      tags: deploy
+
+    - name: Cache the resolved Key Vault name for this run
+      ansible.builtin.set_fact:
+        key_vault_name: "{{ _kv_name.stdout | trim }}"
+      tags: deploy
+
+    - name: Read Nexus reader password from Key Vault (leak check only - never deployed by this playbook)
+      ansible.builtin.command:
+        cmd: >-
+          bash -c 'source infra/scripts/lib.sh; with_timeout 60 az keyvault secret show
+          --vault-name {{ key_vault_name }} -n nexus-reader-password --query value -o tsv'
+        chdir: "{{ playbook_dir }}/.."
+      register: _nexus_reader_password
+      changed_when: false
+      no_log: true
+      tags: deploy
+
+    - name: Launch the winapp-deploy job template
+      ansible.controller.job_launch:
+        name: "{{ aap_jt_deploy }}"
+        organization: "{{ aap_org }}"
+        extra_vars:
+          app_version: "{{ app_version }}"
+          artifact_url: "{{ artifact_url }}"
+          artifact_sha256: "{{ artifact_sha256 }}"
+          git_sha: "{{ git_sha }}"
+        wait: true
+      register: _deploy_job
+      tags: deploy
+
+    - name: Assert winapp-deploy succeeded
+      ansible.builtin.assert:
+        that:
+          - _deploy_job.status == 'successful'
+        fail_msg: "winapp-deploy job {{ _deploy_job.id }} finished with status {{ _deploy_job.status }}"
+        success_msg: "winapp-deploy job {{ _deploy_job.id }} succeeded"
+      tags: deploy
+
+    - name: Fetch the winapp-deploy job stdout from the controller API
+      ansible.builtin.uri:
+        url: "{{ _aap_host }}/api/controller/v2/jobs/{{ _deploy_job.id }}/stdout/?format=txt"
+        headers:
+          Authorization: "Bearer {{ _aap_token }}"
+        validate_certs: false
+        return_content: true
+      register: _deploy_job_stdout
+      no_log: true
+      tags: deploy
+
+    - name: Assert the job stdout does not contain the Nexus reader password
+      ansible.builtin.assert:
+        that:
+          - _nexus_reader_password.stdout | trim not in _deploy_job_stdout.content
+        fail_msg: "winapp-deploy job {{ _deploy_job.id }} stdout contains the Nexus reader password"
+        success_msg: "winapp-deploy job {{ _deploy_job.id }} stdout does not contain the Nexus reader password"
+      no_log: true
+      tags: deploy
+
+    - name: Report deploy verification result
+      ansible.builtin.debug:
+        msg: "winapp-deploy job {{ _deploy_job.id }}: {{ _deploy_job.status }} (stdout leak check passed)"
+      tags: deploy

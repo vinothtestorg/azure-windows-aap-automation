@@ -1,0 +1,22 @@
+---
+- name: Prune old releases beyond the retention count
+  ansible.windows.win_powershell:
+    script: |
+      param([string]$ReleasesDir, [string]$KeepVersion, [string]$PreviousVersion, [int]$Keep)
+      $ErrorActionPreference = 'Stop'
+      $Ansible.Changed = $false
+      if (-not (Test-Path $ReleasesDir)) { return }
+      $keepPath = Join-Path $ReleasesDir $KeepVersion
+      $dirs = Get-ChildItem -Path $ReleasesDir -Directory | Where-Object { $_.Name -notlike '*.tmp' }
+      $dirs = $dirs | Where-Object { $_.FullName -ne $keepPath -and $_.FullName -ne $PreviousVersion }
+      $dirs = $dirs | Sort-Object CreationTime -Descending
+      $toRemove = $dirs | Select-Object -Skip $Keep
+      foreach ($dir in $toRemove) {
+          Remove-Item -Recurse -Force $dir.FullName
+          $Ansible.Changed = $true
+      }
+    parameters:
+      ReleasesDir: "{{ demoapp_root }}\\releases"
+      KeepVersion: "{{ app_version }}"
+      PreviousVersion: "{{ demoapp_previous_release | default('') }}"
+      Keep: "{{ demoapp_keep_releases }}"

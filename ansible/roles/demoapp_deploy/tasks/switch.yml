@@ -1,0 +1,15 @@
+---
+- name: Switch current to the new release
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'switch-release.ps1') }}"
+    parameters:
+      Root: "{{ demoapp_root }}"
+      Version: "{{ app_version }}"
+      PoolName: "{{ demoapp_pool_name }}"
+      SiteName: "{{ demoapp_site_name }}"
+  register: demoapp_switch
+
+- name: Record the previous release and whether a switch happened
+  ansible.builtin.set_fact:
+    demoapp_previous_release: "{{ demoapp_switch.result.previous }}"
+    demoapp_switched: "{{ demoapp_switch.result.switched }}"

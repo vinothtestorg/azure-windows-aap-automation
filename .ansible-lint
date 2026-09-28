@@ -1,0 +1,9 @@
+---
+# demoapp_deploy's variables (demoapp_root, demoapp_key_vault_name, ...) are
+# deliberately flat-prefixed "demoapp_", not "demoapp_deploy_": the same
+# names are shared with ansible/playbooks/group_vars/windows_web.yml and the
+# winapp-deploy job template's launch variables (app_version, artifact_url,
+# artifact_sha256, git_sha), so a role-name prefix would make the surface
+# inconsistent rather than clearer.
+skip_list:
+  - var-naming[no-role-prefix]

@@ -1,0 +1,24 @@
+---
+- name: Wait for the health endpoint to return 200
+  ansible.windows.win_uri:
+    url: "http://localhost:{{ demoapp_port }}/health"
+    status_code: 200
+    return_content: true
+  register: demoapp_health
+  until: demoapp_health.status_code == 200
+  retries: "{{ demoapp_health_retries }}"
+  delay: "{{ demoapp_health_delay }}"
+
+- name: Fetch the deployed version
+  ansible.windows.win_uri:
+    url: "http://localhost:{{ demoapp_port }}/version"
+    status_code: 200
+    return_content: true
+  register: demoapp_version_resp
+
+- name: Verify the deployed version matches the requested version
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - (demoapp_version_resp.content | from_json).version == app_version
+    fail_msg: "Deployed version {{ (demoapp_version_resp.content | from_json).version }} does not match requested {{ app_version }}"

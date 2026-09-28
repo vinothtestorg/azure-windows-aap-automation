@@ -1,0 +1,43 @@
+---
+- name: Ensure IIS and ASP.NET features are installed
+  ansible.windows.win_feature:
+    name:
+      - Web-Server
+      - Web-Asp-Net45
+    state: present
+
+- name: Ensure release and staging directories exist
+  ansible.windows.win_file:
+    path: "{{ demoapp_root }}\\{{ item }}"
+    state: directory
+  loop:
+    - releases
+    - staging
+
+- name: Ensure the DemoApp site, pool and bindings exist
+  ansible.windows.win_powershell:
+    script: |
+      param([string]$SiteName, [string]$PoolName, [string]$PhysicalPath, [int]$Port)
+      $ErrorActionPreference = 'Stop'
+      Import-Module WebAdministration
+      $Ansible.Changed = $false
+      if (Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue) { Remove-Website -Name 'Default Web Site'; $Ansible.Changed = $true }
+      if (-not (Test-Path "IIS:\AppPools\$PoolName")) { New-WebAppPool -Name $PoolName | Out-Null; $Ansible.Changed = $true }
+      $pool = Get-Item "IIS:\AppPools\$PoolName"
+      if ($pool.managedRuntimeVersion -ne 'v4.0') {
+          Set-ItemProperty "IIS:\AppPools\$PoolName" -Name managedRuntimeVersion -Value 'v4.0'
+          $Ansible.Changed = $true
+      }
+      if ($pool.managedPipelineMode -ne 'Integrated') {
+          Set-ItemProperty "IIS:\AppPools\$PoolName" -Name managedPipelineMode -Value 'Integrated'
+          $Ansible.Changed = $true
+      }
+      if (-not (Get-Website -Name $SiteName -ErrorAction SilentlyContinue)) {
+          New-Website -Name $SiteName -Port $Port -PhysicalPath $PhysicalPath -ApplicationPool $PoolName -Force | Out-Null
+          $Ansible.Changed = $true
+      }
+    parameters:
+      SiteName: "{{ demoapp_site_name }}"
+      PoolName: "{{ demoapp_pool_name }}"
+      PhysicalPath: "{{ demoapp_root }}\\current"
+      Port: "{{ demoapp_port }}"

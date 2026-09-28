@@ -1,0 +1,6 @@
+---
+- name: Deploy DemoApp to IIS
+  hosts: windows_web
+  gather_facts: false
+  roles:
+    - role: demoapp_deploy
