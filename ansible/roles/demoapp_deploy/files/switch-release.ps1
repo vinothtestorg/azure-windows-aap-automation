@@ -19,6 +19,7 @@ if ($previous -eq $target) {
 if ((Get-WebAppPoolState -Name $PoolName).Value -ne 'Stopped') {
     Stop-WebAppPool -Name $PoolName
     for ($i = 0; $i -lt 30 -and (Get-WebAppPoolState -Name $PoolName).Value -ne 'Stopped'; $i++) { Start-Sleep -Seconds 1 }
+    if ((Get-WebAppPoolState -Name $PoolName).Value -ne 'Stopped') { throw "$PoolName did not stop within 30s" }
 }
 if (Test-Path $current) { cmd /c rmdir "$current" | Out-Null }   # removes the junction only, never the release
 New-Item -ItemType Junction -Path $current -Target $target | Out-Null

@@ -51,7 +51,14 @@ ansible-playbook aap/verify.yml
 
 `aap_project_branch` defaults to `main`; it is pinned to `poc/implementation`
 during PoC development so the AAP project syncs this branch. Both playbooks
-are idempotent — a second `configure.yml` run reports `changed=0`.
+are idempotent — a second `configure.yml` run reports `changed=0`. The
+`winapp-deploy` job template's creation is preceded by a forced project
+sync (`ansible.controller.project_update`, needed so its playbook path -
+`ansible/playbooks/deploy.yml` - already resolves in the project's checked
+out tree the first time the job template is created); that task itself
+always runs but is `changed_when: false`, since refreshing the project's
+checkout never changes any configured AAP object's state, so it does not
+break the `changed=0` re-run guarantee above.
 
 ## What it creates
 

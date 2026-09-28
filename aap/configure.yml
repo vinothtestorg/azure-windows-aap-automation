@@ -269,6 +269,11 @@
         name: "{{ aap_project_name }}"
         organization: "{{ aap_org }}"
         wait: true
+      # A project refresh pulls the latest commit but never changes any
+      # configured AAP object's state itself, so it must not count toward
+      # this play's changed total - otherwise a second, no-op configure run
+      # would incorrectly report changed>0.
+      changed_when: false
       tags: deploy
 
     # Prompts on launch for both extra vars (app_version/artifact_url/
