@@ -1,0 +1,33 @@
+#cloud-config
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+write_files:
+  - path: /opt/nexus/docker-compose.yml
+    permissions: '0644'
+    content: |
+      __COMPOSE__
+  - path: /opt/nexus/Caddyfile
+    permissions: '0644'
+    content: |
+      __CADDYFILE__
+  - path: /opt/nexus/mount-data.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      for dev in /dev/disk/azure/data/by-lun/0 /dev/disk/azure/scsi1/lun0; do
+        [ -e "$dev" ] && disk="$(readlink -f "$dev")" && break
+      done
+      : "${disk:?data disk for LUN 0 not found}"
+      if ! blkid "$disk" >/dev/null 2>&1; then mkfs.ext4 -L nexusdata "$disk"; fi
+      mkdir -p /nexus-data
+      uuid="$(blkid -s UUID -o value "$disk")"
+      grep -q "$uuid" /etc/fstab || echo "UUID=$uuid /nexus-data ext4 defaults,nofail 0 2" >> /etc/fstab
+      mount -a
+      chown -R 200:200 /nexus-data
+runcmd:
+  - /opt/nexus/mount-data.sh
+  - systemctl enable --now docker
+  - cd /opt/nexus && docker compose up -d

@@ -1,0 +1,25 @@
+services:
+  nexus:
+    image: sonatype/nexus3:3.96.3
+    restart: unless-stopped
+    environment:
+      INSTALL4J_ADD_VM_PARAMS: "-Xms2g -Xmx2g -XX:MaxDirectMemorySize=2g -Djava.util.prefs.userRoot=/nexus-data/javaprefs"
+    volumes:
+      - /nexus-data:/nexus-data
+    expose:
+      - "8081"
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - nexus
+volumes:
+  caddy_data: {}
+  caddy_config: {}

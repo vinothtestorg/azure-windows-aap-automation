@@ -34,6 +34,10 @@ deploy false
 "$REPO_ROOT/infra/scripts/create-aap-sp.sh"
 
 if [[ "$foundation_only" == false ]]; then
+  key="$HOME/.ssh/winapp_poc_nexus"
+  [[ -f "$key" ]] || ssh-keygen -t ed25519 -N '' -C 'winapp-poc-nexus' -f "$key" >/dev/null
+  export NEXUS_SSH_PUBLIC_KEY; NEXUS_SSH_PUBLIC_KEY="$(cat "$key.pub")"
+
   log "compute deployment"
   deploy true
 fi

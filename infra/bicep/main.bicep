@@ -19,8 +19,9 @@ param githubRepo string = 'azure-windows-aap-automation'
 param deployCompute bool = false
 
 // Consumed by the Task 5 compute module; the foundation pass has no compute yet.
+// The matching private key lives only on the admin workstation (deploy.sh
+// generates it under ~/.ssh and never commits it).
 @description('SSH public key for the Nexus VM admin user (Task 5). Empty during the foundation-only pass.')
-#disable-next-line no-unused-params
 param nexusSshPublicKey string = ''
 
 var kvName = 'kv-winapp-poc-${take(uniqueString(resourceGroup().id), 6)}'
@@ -100,6 +101,16 @@ module appVmSecret 'modules/secret-reader.bicep' = if (deployCompute) {
   }
 }
 
+module nexusVm 'modules/vm-nexus.bicep' = if (deployCompute) {
+  name: 'nexus-vm'
+  params: {
+    location: location
+    tags: commonTags
+    subnetId: network.outputs.toolsSubnetId
+    sshPublicKey: nexusSshPublicKey
+  }
+}
+
 output keyVaultName string = keyvault.outputs.name
 output keyVaultUri string = keyvault.outputs.uri
 output ghDeployerClientId string = identity.outputs.clientId
@@ -111,3 +122,5 @@ output toolsSubnetId string = network.outputs.toolsSubnetId
 output appVmFqdn string = deployCompute ? appVm.outputs.fqdn : ''
 #disable-next-line BCP318
 output appVmPrincipalId string = deployCompute ? appVm.outputs.principalId : ''
+#disable-next-line BCP318
+output nexusFqdn string = deployCompute ? nexusVm.outputs.fqdn : ''
