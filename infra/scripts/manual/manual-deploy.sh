@@ -84,18 +84,31 @@ sha_url="$NEXUS_URL/repository/$NEXUS_REPO/$sha_path"
 log "uploading $zip_path to Nexus"
 # Not --fail-with-body here: a 409 (ALLOW_ONCE conflict) is an expected,
 # handled outcome on a re-run, not a hard error, so the status is inspected
-# explicitly instead of letting curl turn it into a nonzero exit.
-zip_status="$(curl -sS -o /dev/null -w '%{http_code}' -u "svc-gh-deployer:$dep_pw" --upload-file "$zip_file" "$zip_url")"
+# explicitly instead of letting curl turn it into a nonzero exit. Every curl
+# below is bounded (--connect-timeout/--max-time) and its own network-level
+# failure (not the same thing as a non-2xx HTTP status, which curl without
+# --fail still reports as exit 0) is checked explicitly, so a Nexus/app
+# network stall fails loudly instead of hanging the script.
+if ! zip_status="$(curl -sS --connect-timeout 15 --max-time 300 -o /dev/null -w '%{http_code}' -u "svc-gh-deployer:$dep_pw" --upload-file "$zip_file" "$zip_url")"; then
+  log "upload request for $zip_path timed out or failed (network error, not an HTTP status)"
+  exit 1
+fi
 case "$zip_status" in
   201)
     log "uploaded $zip_path"
-    sha_status="$(curl -sS -o /dev/null -w '%{http_code}' -u "svc-gh-deployer:$dep_pw" --upload-file "$sha_file" "$sha_url")"
+    if ! sha_status="$(curl -sS --connect-timeout 15 --max-time 300 -o /dev/null -w '%{http_code}' -u "svc-gh-deployer:$dep_pw" --upload-file "$sha_file" "$sha_url")"; then
+      log "upload request for $sha_path timed out or failed (network error, not an HTTP status)"
+      exit 1
+    fi
     [[ "$sha_status" == "201" ]] || { log "unexpected status $sha_status uploading $sha_path"; exit 1; }
     log "uploaded $sha_path"
     ;;
   409)
     log "$zip_path already exists in Nexus (409, ALLOW_ONCE) — checking remote .sha256 for a safe re-run"
-    remote_sha_body="$(curl -sS -u "svc-gh-deployer:$dep_pw" "$sha_url" || true)"
+    if ! remote_sha_body="$(curl -sS --connect-timeout 15 --max-time 30 -u "svc-gh-deployer:$dep_pw" "$sha_url")"; then
+      log "request for remote $sha_path timed out or failed (network error) — cannot verify a safe re-run"
+      exit 1
+    fi
     if [[ "$remote_sha_body" == "$local_sha_line" ]]; then
       log "remote .sha256 matches local — version already deployed to Nexus, skipping upload"
     else
@@ -139,16 +152,25 @@ printf '%s\n' "$run_out"
 
 # --- 5: verify ------------------------------------------------------------
 log "verifying $APP_URL"
-health="$(curl -sS "$APP_URL/health")"
+if ! health="$(curl -sS --connect-timeout 15 --max-time 30 "$APP_URL/health")"; then
+  log "GET $APP_URL/health timed out or failed"
+  exit 1
+fi
 echo "health: $health"
-version_body="$(curl -sS "$APP_URL/version")"
+if ! version_body="$(curl -sS --connect-timeout 15 --max-time 30 "$APP_URL/version")"; then
+  log "GET $APP_URL/version timed out or failed"
+  exit 1
+fi
 echo "version: $version_body"
 remote_version="$(jq -r '.version' <<<"$version_body")"
 if [[ "$remote_version" != "$version" ]]; then
   log "deployed version mismatch: expected $version, /version returned $remote_version"
   exit 1
 fi
-home_snippet="$(curl -sS "$APP_URL/" | grep -o 'Version [^<]*' || true)"
+# Purely informational (the version gate above already decided pass/fail),
+# so a failure here is non-fatal — but still bounded, so a stall can't hang
+# the script after the real verification has already succeeded.
+home_snippet="$(curl -sS --connect-timeout 15 --max-time 30 "$APP_URL/" | grep -o 'Version [^<]*' || true)"
 echo "home: $home_snippet"
 
 log "manual deploy verified: $version is live at $APP_URL"
