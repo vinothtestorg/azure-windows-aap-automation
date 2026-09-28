@@ -256,10 +256,25 @@
         state: present
       tags: base
 
-    # --- 14. Job template: winapp-deploy (Task 8). Prompts on launch for
-    # both extra vars (app_version/artifact_url/artifact_sha256/git_sha -
-    # demoapp_deploy's Global Constraints) and --limit, never runs two
-    # deploys concurrently, and is bounded to 30 minutes server-side.
+    # --- 14. Job template: winapp-deploy (Task 8). scm_update_on_launch
+    # only syncs the project when a JOB launches against it, not when this
+    # `ansible.controller.project` ensure-task runs with no other changes -
+    # so a project created/left pointed at poc/implementation by an earlier
+    # run can still be serving an older commit's file tree here. Creating a
+    # job template needs its playbook path to already resolve in that
+    # tree, so force a sync now rather than relying on some earlier,
+    # unrelated launch having happened to pick up ansible/playbooks/deploy.yml.
+    - name: Sync the project so ansible/playbooks/deploy.yml is present before creating winapp-deploy
+      ansible.controller.project_update:
+        name: "{{ aap_project_name }}"
+        organization: "{{ aap_org }}"
+        wait: true
+      tags: deploy
+
+    # Prompts on launch for both extra vars (app_version/artifact_url/
+    # artifact_sha256/git_sha - demoapp_deploy's Global Constraints) and
+    # --limit, never runs two deploys concurrently, and is bounded to 30
+    # minutes server-side.
     - name: Ensure job template winapp-deploy exists
       ansible.controller.job_template:
         name: "{{ aap_jt_deploy }}"
