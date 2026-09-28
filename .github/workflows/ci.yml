@@ -13,6 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-2022
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.meta.outputs.version }}
       git_sha: ${{ steps.meta.outputs.git_sha }}
