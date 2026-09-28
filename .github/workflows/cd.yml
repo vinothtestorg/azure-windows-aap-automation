@@ -1,0 +1,77 @@
+name: cd
+
+on:
+  workflow_call:
+    inputs:
+      version: { required: true, type: string }
+      package_name: { required: true, type: string }
+      sha256: { required: true, type: string }
+      git_sha: { required: true, type: string }
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: cd-poc
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: poc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: demoapp-package
+          path: dist
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Read Nexus deployer password
+        id: nexus
+        run: |
+          pw="$(az keyvault secret show --vault-name "${{ vars.KEY_VAULT_NAME }}" -n nexus-deployer-password --query value -o tsv)"
+          echo "::add-mask::$pw"
+          echo "password=$pw" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to Nexus
+        env:
+          NEXUS_URL: ${{ vars.NEXUS_URL }}
+          NEXUS_REPOSITORY: ${{ vars.NEXUS_REPOSITORY }}
+          NEXUS_USER: svc-gh-deployer
+          NEXUS_PASSWORD: ${{ steps.nexus.outputs.password }}
+        run: |
+          remote="demoapp/${{ inputs.version }}/${{ inputs.package_name }}"
+          bash .github/scripts/nexus-upload.sh "dist/${{ inputs.package_name }}" "$remote"
+          bash .github/scripts/nexus-upload.sh "dist/${{ inputs.package_name }}.sha256" "$remote.sha256"
+          echo "artifact_url=${NEXUS_URL%/}/repository/${NEXUS_REPOSITORY}/$remote" >> "$GITHUB_ENV"
+
+      - name: Launch AAP job template
+        id: aap
+        env:
+          TOWER_HOST: ${{ vars.TOWER_HOST }}
+          AWXKIT_API_BASE_PATH: ${{ vars.AWXKIT_API_BASE_PATH }}
+          TOWER_OAUTH_TOKEN: ${{ secrets.TOWER_OAUTH_TOKEN }}
+        run: |
+          jq -n --arg v "${{ inputs.version }}" --arg u "$artifact_url" --arg s "${{ inputs.sha256 }}" --arg g "${{ inputs.git_sha }}" \
+            '{app_version:$v, artifact_url:$u, artifact_sha256:$s, git_sha:$g}' > extra-vars.json
+          bash .github/scripts/aap-launch.sh "${{ vars.AAP_JOB_TEMPLATE }}" extra-vars.json
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### DemoApp deployment"
+            echo "| Item | Value |"; echo "|---|---|"
+            echo "| Version | ${{ inputs.version }} |"
+            echo "| Artifact | ${artifact_url:-not uploaded} |"
+            echo "| AAP job | ${{ steps.aap.outputs.job_url || 'not launched' }} |"
+            echo "| Result | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
