@@ -15,6 +15,12 @@ param githubOrg string = 'vinothtestorg'
 @description('GitHub repository name, used for OIDC federation subject.')
 param githubRepo string = 'azure-windows-aap-automation'
 
+@description('Numeric GitHub org/owner ID, required by the immutable OIDC subject format. Read with: gh api repos/<org>/<repo> --jq "{repo_id:.id, owner_id:.owner.id}"')
+param githubOrgId string
+
+@description('Numeric GitHub repository ID, required by the immutable OIDC subject format. Read with: gh api repos/<org>/<repo> --jq "{repo_id:.id, owner_id:.owner.id}"')
+param githubRepoId string
+
 @description('When true, deploys compute modules (Tasks 4 and 5) in addition to the foundation.')
 param deployCompute bool = false
 
@@ -53,6 +59,8 @@ module identity 'modules/identity.bicep' = {
     tags: commonTags
     githubOrg: githubOrg
     githubRepo: githubRepo
+    githubOrgId: githubOrgId
+    githubRepoId: githubRepoId
   }
 }
 
