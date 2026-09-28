@@ -1,0 +1,10 @@
+---
+collections:
+  - name: ansible.platform
+    version: ">=2.7.0"
+    source: https://console.redhat.com/api/automation-hub/content/published/
+  - name: ansible.controller
+    version: ">=4.8.0"
+    source: https://console.redhat.com/api/automation-hub/content/published/
+  - name: ansible.windows
+  - name: azure.azcollection

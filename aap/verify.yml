@@ -1,0 +1,126 @@
+---
+# Verifies the AAP objects created by aap/configure.yml actually work:
+# the azure_rm inventory source syncs and finds exactly vm-winapp-01 in the
+# windows_web group, and the winapp-ping job template runs successfully
+# (which also proves the default execution environment ships pypsrp -
+# risk K3).
+#
+# Run from the repo root, after configure.yml:
+#   set -a; . ./.env.aap; set +a
+#   ansible-playbook aap/verify.yml
+- name: Verify AAP inventory sync and ping job for the Azure Windows PoC
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars/poc.yml
+
+  # module_defaults (below) only applies to modules, not to lookup plugins,
+  # so the ansible.controller.controller_api lookup calls further down pass
+  # host/aap_token explicitly from these. The lookup plugin's own `host`
+  # option (unlike the modules') only falls back to env var CONTROLLER_HOST,
+  # not TOWER_HOST, so it cannot be left to auto-detect from .env.aap.
+  vars:
+    _aap_host: "{{ lookup('ansible.builtin.env', 'TOWER_HOST') }}"
+    _aap_token: "{{ lookup('ansible.builtin.env', 'TOWER_OAUTH_TOKEN') }}"
+
+  module_defaults:
+    group/ansible.controller.controller:
+      aap_hostname: "{{ _aap_host }}"
+      aap_token: "{{ _aap_token }}"
+
+  tasks:
+    - name: Sync the azure-rm inventory source
+      ansible.controller.inventory_source_update:
+        name: azure-rm
+        inventory: "{{ aap_inventory }}"
+        organization: "{{ aap_org }}"
+        wait: true
+      register: _inv_sync
+      tags: base
+
+    - name: Assert the inventory sync was successful
+      ansible.builtin.assert:
+        that:
+          - _inv_sync.status == 'successful'
+        fail_msg: "Inventory source sync did not succeed: {{ _inv_sync.status | default('unknown') }}"
+        success_msg: "Inventory source sync succeeded (update id {{ _inv_sync.id }})"
+      tags: base
+
+    - name: Look up the inventory id
+      ansible.builtin.set_fact:
+        _inventory_id: >-
+          {{ lookup('ansible.controller.controller_api', 'inventories', query_params={'name': aap_inventory},
+          return_ids=True, host=_aap_host, aap_token=_aap_token) }}
+      tags: base
+
+    - name: List all hosts in the inventory
+      ansible.builtin.set_fact:
+        _inventory_hosts: >-
+          {{ (query('ansible.controller.controller_api', 'hosts', query_params={'inventory': _inventory_id},
+          host=_aap_host, aap_token=_aap_token)) | map(attribute='name') | list }}
+      tags: base
+
+    - name: Assert the inventory contains exactly vm-winapp-01 (vm-nexus-01 must not appear)
+      ansible.builtin.assert:
+        that:
+          - _inventory_hosts == ['vm-winapp-01']
+        fail_msg: "Inventory {{ aap_inventory }} hosts were {{ _inventory_hosts }}, expected ['vm-winapp-01']"
+        success_msg: "Inventory {{ aap_inventory }} hosts: {{ _inventory_hosts }}"
+      tags: base
+
+    - name: Look up the windows_web group id in this inventory
+      ansible.builtin.set_fact:
+        _windows_web_group_id: >-
+          {{ lookup('ansible.controller.controller_api', 'groups',
+          query_params={'inventory': _inventory_id, 'name': 'windows_web'}, return_ids=True,
+          host=_aap_host, aap_token=_aap_token) }}
+      tags: base
+
+    - name: Assert the windows_web group exists
+      ansible.builtin.assert:
+        that:
+          - _windows_web_group_id | length > 0
+        fail_msg: "No windows_web group found in inventory {{ aap_inventory }}"
+      tags: base
+
+    - name: List hosts in the windows_web group
+      ansible.builtin.set_fact:
+        _windows_web_hosts: >-
+          {{ (query('ansible.controller.controller_api', 'groups/' ~ _windows_web_group_id ~ '/hosts/',
+          host=_aap_host, aap_token=_aap_token)) | map(attribute='name') | list }}
+      tags: base
+
+    - name: Assert vm-winapp-01 is in the windows_web group
+      ansible.builtin.assert:
+        that:
+          - "'vm-winapp-01' in _windows_web_hosts"
+        fail_msg: "windows_web group hosts were {{ _windows_web_hosts }}, expected to contain vm-winapp-01"
+        success_msg: "windows_web group hosts: {{ _windows_web_hosts }}"
+      tags: base
+
+    - name: Launch the winapp-ping job template
+      ansible.controller.job_launch:
+        name: "{{ aap_jt_ping }}"
+        organization: "{{ aap_org }}"
+        wait: true
+      register: _ping_job
+      tags: base
+
+    - name: Assert winapp-ping succeeded
+      ansible.builtin.assert:
+        that:
+          - _ping_job.status == 'successful'
+        fail_msg: "winapp-ping job {{ _ping_job.id }} finished with status {{ _ping_job.status }}"
+        success_msg: "winapp-ping job {{ _ping_job.id }} succeeded"
+      tags: base
+
+    - name: Report verification results
+      ansible.builtin.debug:
+        msg:
+          - "Inventory sync: {{ _inv_sync.status }}"
+          - "Inventory hosts: {{ _inventory_hosts }}"
+          - "windows_web hosts: {{ _windows_web_hosts }}"
+          - "winapp-ping job {{ _ping_job.id }}: {{ _ping_job.status }}"
+      tags: base
