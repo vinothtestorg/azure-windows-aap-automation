@@ -53,10 +53,12 @@ Prerequisites for either path:
    drive).
 5. On the VM, in an elevated PowerShell session:
    ```powershell
-   $version = '<version>'   # e.g. 1.0.13, from the zip's filename
+   $version = '<version>'   # e.g. 1.0.15, from the zip's filename
    $root = 'C:\inetpub\demoapp'
+   $release = "$root\releases\$version"
+   $current = "$root\current"
    New-Item -ItemType Directory -Force -Path "$root\releases", "$root\staging" | Out-Null
-   Expand-Archive -Path "<path to the copied zip>" -DestinationPath "$root\releases\$version"
+   Expand-Archive -Path "<path to the copied zip>" -DestinationPath $release
 
    Import-Module WebAdministration
    if (Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue) { Remove-Website -Name 'Default Web Site' }
@@ -64,14 +66,31 @@ Prerequisites for either path:
    Set-ItemProperty 'IIS:\AppPools\DemoAppPool' -Name managedRuntimeVersion -Value 'v4.0'
    Set-ItemProperty 'IIS:\AppPools\DemoAppPool' -Name managedPipelineMode -Value 'Integrated'
 
-   $current = "$root\current"
-   if (Test-Path $current) { cmd /c rmdir "$current" | Out-Null }
-   New-Item -ItemType Junction -Path $current -Target "$root\releases\$version" | Out-Null
+   # Stop the pool before repointing the junction — IIS keeps the previously
+   # loaded assembly resident in the worker process and never notices files
+   # changing underneath an already-open junction, so skipping this step
+   # would deploy the new bits to disk without ever actually serving them.
+   # Skip the stop/swap/start entirely if $current already points at
+   # $release (redeploying the same version must not bounce the site).
+   $needsSwap = -not ((Test-Path $current) -and (@((Get-Item $current).Target) -contains $release))
+   if ($needsSwap) {
+       if ((Get-Item 'IIS:\AppPools\DemoAppPool').state -ne 'Stopped') {
+           Stop-WebAppPool -Name 'DemoAppPool'
+           $deadline = (Get-Date).AddSeconds(30)
+           while ((Get-Item 'IIS:\AppPools\DemoAppPool').state -ne 'Stopped') {
+               if ((Get-Date) -gt $deadline) { throw 'timed out waiting for DemoAppPool to stop' }
+               Start-Sleep -Milliseconds 500
+           }
+       }
+       if (Test-Path $current) { cmd /c rmdir "$current" | Out-Null }
+       New-Item -ItemType Junction -Path $current -Target $release | Out-Null
+       Start-WebAppPool -Name 'DemoAppPool'
+   }
 
    if (-not (Get-Website -Name 'DemoApp' -ErrorAction SilentlyContinue)) {
        New-Website -Name 'DemoApp' -Port 80 -PhysicalPath $current -ApplicationPool 'DemoAppPool' | Out-Null
    }
-   Start-Website -Name 'DemoApp'
+   if ((Get-Website -Name 'DemoApp').State -ne 'Started') { Start-Website -Name 'DemoApp' }
    ```
 6. From your workstation, browse/curl `http://winapp-poc.eastus.cloudapp.azure.com/health`
    and `/version` (verification commands below).
@@ -115,17 +134,26 @@ VM. Steps, in order:
 5. Runs `manual-deploy.ps1` on the VM via
    `az vm run-command invoke --command-id RunPowerShellScript --scripts
    @infra/scripts/manual/manual-deploy.ps1 --parameters ArtifactUrl=... Version=...
-   Sha256=... KeyVaultName=...`. The script itself is idempotent (it only
+   Sha256=... KeyVaultName=...`. The script is idempotent (it only
    `Expand-Archive`s if the release folder doesn't already exist, only
-   creates the app pool/site/junction if missing, and always ends with
-   `Start-Website`), so a re-run against an unchanged version is a safe
-   no-op that still leaves the site started. `manual-deploy.ps1` fetches the
-   **reader** password (`nexus-reader-password`) itself, straight from Key
-   Vault using the VM's own managed identity token — the deployer password
-   never leaves the workstation, and the run-command parameters passed by
-   `manual-deploy.sh` carry no secret (`ArtifactUrl`, `Version`, `Sha256`,
-   `KeyVaultName` are all non-sensitive), so the run-command message/output
-   captured by `az` (and printed by the script) never contains a password.
+   creates the app pool/site if missing) and, when the target release is
+   actually **changing**, stops `DemoAppPool` (waiting, bounded to ~30s,
+   until it reports `Stopped`), repoints the `current` junction, then starts
+   the pool again before ensuring the site is started — this recycle is
+   required because IIS/ASP.NET keeps the previously-deployed assembly
+   resident in the running worker process and never notices the on-disk
+   swap underneath an already-open junction, so without it a new version
+   would sit on disk correctly but simply never be served. When the target
+   release is **unchanged** (a same-version re-run), the script skips the
+   stop/swap/start sequence entirely — it never touches the pool or site —
+   so redeploying the same version twice in a row does not bounce anything.
+   `manual-deploy.ps1` fetches the **reader** password
+   (`nexus-reader-password`) itself, straight from Key Vault using the VM's
+   own managed identity token — the deployer password never leaves the
+   workstation, and the run-command parameters passed by `manual-deploy.sh`
+   carry no secret (`ArtifactUrl`, `Version`, `Sha256`, `KeyVaultName` are
+   all non-sensitive), so the run-command message/output captured by `az`
+   (and printed by the script) never contains a password.
 6. Curls `/health` and `/version` on the app URL and fails (`exit 1`) if
    `/version`'s `version` field doesn't equal the version just deployed.
 

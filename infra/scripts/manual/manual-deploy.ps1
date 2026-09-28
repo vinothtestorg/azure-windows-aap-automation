@@ -24,11 +24,40 @@ if (Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue) { Remove
 if (-not (Test-Path 'IIS:\AppPools\DemoAppPool')) { New-WebAppPool -Name 'DemoAppPool' | Out-Null }
 Set-ItemProperty 'IIS:\AppPools\DemoAppPool' -Name managedRuntimeVersion -Value 'v4.0'
 Set-ItemProperty 'IIS:\AppPools\DemoAppPool' -Name managedPipelineMode -Value 'Integrated'
-if (Test-Path $current) { cmd /c rmdir "$current" | Out-Null }
-New-Item -ItemType Junction -Path $current -Target $release | Out-Null
+
+# Only touch the app pool / junction when the target release is actually
+# changing. IIS/ASP.NET keeps the previously-loaded assembly resident in a
+# running worker process and does not notice files changing underneath an
+# already-open junction, so a version change would otherwise go unserved
+# until the pool happened to recycle on its own for an unrelated reason.
+# A same-version re-run must not bounce the site, so it skips this whole
+# block. $current not existing yet (first-ever deploy) always takes the
+# swap path below.
+$needsSwap = $true
+if (Test-Path $current) {
+    if (@((Get-Item $current).Target) -contains $release) { $needsSwap = $false }
+}
+
+if ($needsSwap) {
+    if ((Get-Item 'IIS:\AppPools\DemoAppPool').state -ne 'Stopped') {
+        Stop-WebAppPool -Name 'DemoAppPool'
+        $deadline = (Get-Date).AddSeconds(30)
+        while ((Get-Item 'IIS:\AppPools\DemoAppPool').state -ne 'Stopped') {
+            if ((Get-Date) -gt $deadline) { throw 'timed out waiting for DemoAppPool to stop' }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+
+    if (Test-Path $current) { cmd /c rmdir "$current" | Out-Null }
+    New-Item -ItemType Junction -Path $current -Target $release | Out-Null
+
+    Start-WebAppPool -Name 'DemoAppPool'
+}
+
 if (-not (Get-Website -Name 'DemoApp' -ErrorAction SilentlyContinue)) {
     New-Website -Name 'DemoApp' -Port 80 -PhysicalPath $current -ApplicationPool 'DemoAppPool' | Out-Null
 }
-Start-Website -Name 'DemoApp'
+if ((Get-Website -Name 'DemoApp').State -ne 'Started') { Start-Website -Name 'DemoApp' }
+
 Add-Content -Path (Join-Path $root 'deployments.log') -Value ("{0:o} version={1} git_sha=manual job=manual result=success" -f (Get-Date).ToUniversalTime(), $Version)
 "manual deploy ok $Version"
