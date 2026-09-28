@@ -1,0 +1,3 @@
+nexus-winapp-poc.eastus.cloudapp.azure.com {
+	reverse_proxy nexus:8081
+}

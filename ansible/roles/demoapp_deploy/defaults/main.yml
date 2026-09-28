@@ -1,0 +1,14 @@
+---
+demoapp_root: 'C:\inetpub\demoapp'
+demoapp_site_name: DemoApp
+demoapp_pool_name: DemoAppPool
+demoapp_port: 80
+demoapp_keep_releases: 5
+demoapp_health_retries: 10
+demoapp_health_delay: 6
+demoapp_allowed_artifact_prefix: https://nexus-winapp-poc.eastus.cloudapp.azure.com/repository/demoapp-releases/
+demoapp_nexus_reader_user: svc-win-reader
+demoapp_nexus_reader_secret: nexus-reader-password
+demoapp_key_vault_name: ""   # set in group_vars/windows_web.yml
+demoapp_job_id: "{{ awx_job_id | default('local') }}"
+git_sha: unknown

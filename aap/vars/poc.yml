@@ -1,0 +1,17 @@
+---
+aap_org: winapp-poc
+aap_team: cd-automation
+aap_cd_user: svc-github-cd
+aap_project_name: azure-windows-aap-automation
+aap_project_url: https://github.com/vinothtestorg/azure-windows-aap-automation.git
+aap_project_branch: main
+aap_inventory: azure-windows-poc
+aap_cred_azure_rm: azure-sp-poc
+aap_cred_key_vault: azure-kv-poc
+aap_cred_machine: win-ansible-svc
+aap_jt_ping: winapp-ping
+aap_jt_deploy: winapp-deploy
+azure_subscription_id: 03b6c75f-a3f1-429f-ab89-0f9b07087638
+azure_tenant_id: e31db877-05a5-4e5a-acfe-c0384e23172a
+azure_resource_group: rg-winapp-poc
+key_vault_name: "{{ lookup('ansible.builtin.pipe', 'az deployment group show -g rg-winapp-poc -n main --query properties.outputs.keyVaultName.value -o tsv') }}"

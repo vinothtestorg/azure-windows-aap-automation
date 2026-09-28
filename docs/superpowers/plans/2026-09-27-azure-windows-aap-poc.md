@@ -21,8 +21,8 @@ Values copied from the HLD. Every task's requirements include this section.
 - Key Vault secrets: `vm-admin-password`, `ansible-svc-password`, `nexus-admin-password`, `nexus-deployer-password`, `nexus-reader-password`, `aap-sp-client-id`, `aap-sp-client-secret`, `aap-svc-github-cd-password`.
 - Generated passwords: 28 random `[A-Za-z0-9]` characters followed by `Aa1_` (32 chars). No other special characters (they break PowerShell and shell quoting).
 - Admin source IP for RDP/SSH NSG rules: `161.142.151.25/32`.
-- App VM: Windows Server 2022 Datacenter Azure Edition (`MicrosoftWindowsServer:WindowsServer:2022-datacenter-azure-edition:latest`), `Standard_B2ms`, Premium SSD, Trusted Launch, system-assigned MI, admin user `azureadmin`, automation user `ansible_svc`.
-- Nexus VM: Ubuntu 24.04 LTS (`Canonical:ubuntu-24_04-lts:server:latest`), `Standard_B2ms`, 64 GiB Premium SSD data disk at `/nexus-data`, SSH key auth only, admin user `azureadmin`.
+- App VM: Windows Server 2022 Datacenter Azure Edition (`MicrosoftWindowsServer:WindowsServer:2022-datacenter-azure-edition:latest`), `Standard_D2as_v7` (NVMe disk controller), Premium SSD, Trusted Launch, system-assigned MI, admin user `azureadmin`, automation user `ansible_svc`.
+- Nexus VM: Ubuntu 24.04 LTS (`Canonical:ubuntu-24_04-lts:server:latest`), `Standard_D2as_v7` (NVMe disk controller), 64 GiB Premium SSD data disk at `/nexus-data`, SSH key auth only, admin user `azureadmin`.
 - Nexus: image `sonatype/nexus3:3.96.3`, JVM `-Xms2g -Xmx2g -XX:MaxDirectMemorySize=2g`, URL `https://nexus-winapp-poc.eastus.cloudapp.azure.com`, raw hosted repo `demoapp-releases` with write policy `ALLOW_ONCE`, roles `demoapp-deployer` (add, edit, read, browse) and `demoapp-reader` (read, browse), users `svc-gh-deployer` and `svc-win-reader`, anonymous access disabled.
 - Artifact: version `1.0.<GITHUB_RUN_NUMBER>`, package `DemoApp-<version>-<sha7>.zip`, Nexus path `demoapp/<version>/DemoApp-<version>-<sha7>.zip` plus `.sha256`. Zip root = published site root (`Web.config` at the root). Package contains `version.json` = `{"version":"<version>","gitSha":"<sha7>"}`.
 - App endpoints: `/health` → HTTP 200 `{"status":"ok"}`; `/version` → HTTP 200 `{"version":"…","gitSha":"…"}`; `/` HTML page showing the version.
@@ -39,7 +39,8 @@ Values copied from the HLD. Every task's requirements include this section.
 
 ## Preflight rulings
 
-- Ruling: Nexus VM is `Standard_B2ms`, not `Standard_B4ms` — the subscription is Azure Free Trial (4 vCPU regional cap), and 2 + 2 vCPU fits — cost if wrong: Nexus runs slowly; resize later.
+- Ruling: Nexus VM is 2 vCPU, not `Standard_B4ms` — the subscription is Azure Free Trial (4 vCPU regional cap), and 2 + 2 vCPU fits — cost if wrong: Nexus runs slowly; resize later.
+- Ruling (added during Task 4): both VMs use `Standard_D2as_v7` with `storageProfile.diskControllerType: 'NVMe'` — this Free Trial subscription marks B-series and older D-series `NotAvailableForSubscription`; v7 sizes are unrestricted, and total cores (4) and `StandardDasv7Family` (4) quotas fit exactly. Both images (`2022-datacenter-azure-edition`, `ubuntu-24_04-lts/server`) support NVMe and Trusted Launch — cost if wrong: redeploy with another unrestricted size.
 - Ruling: App uses an SDK-style project (`MSBuild.SDK.SystemWeb`) instead of a classic csproj — it compiles on macOS (verified by a spike), so implementers get a local compile loop — cost if wrong: switch to a classic csproj built only in CI.
 - Ruling: `HomeController` returns HTML through `ContentResult` (no Razor views) — removes runtime view-compilation risk — cost if wrong: add a view later.
 - Ruling: VM configuration uses a managed Run Command resource instead of the Custom Script Extension — it takes the inline script and protected parameters without length or quoting limits — cost if wrong: none functionally.
@@ -891,7 +892,7 @@ Parse check: `~/.dotnet/tools/pwsh -NoProfile -c '$e=$null; [System.Management.A
 
 - [ ] **Step 2: Write `vm-windows.bicep`**
 
-Params: `location`, `tags` (must include `app: 'demoapp'`), `subnetId`, `adminUsername` (`azureadmin`), `@secure() adminPassword`, `@secure() ansiblePassword`, `vmSize` (`Standard_B2ms`), `dnsLabel` (`winapp-poc`), `shutdownTimeUtc` (`1800`).
+Params: `location`, `tags` (must include `app: 'demoapp'`), `subnetId`, `adminUsername` (`azureadmin`), `@secure() adminPassword`, `@secure() ansiblePassword`, `vmSize` (`Standard_D2as_v7`), `dnsLabel` (`winapp-poc`), `shutdownTimeUtc` (`1800`).
 Resources:
 - `pip-winapp-vm`: Standard SKU, Static, `dnsSettings.domainNameLabel: dnsLabel`.
 - NIC `nic-vm-winapp-01` in `subnetId` with the public IP.
@@ -1110,7 +1111,7 @@ runcmd:
 
 - [ ] **Step 3: Write `vm-nexus.bicep` and wire it in**
 
-Params: `location`, `tags` (no `app` tag), `subnetId`, `adminUsername` (`azureadmin`), `sshPublicKey`, `vmSize` (`Standard_B2ms`), `dnsLabel` (`nexus-winapp-poc`). Resources: `pip-nexus` (Standard, Static, DNS label), NIC `nic-vm-nexus-01`, VM `vm-nexus-01` with image `Canonical/ubuntu-24_04-lts/server/latest`, `linuxConfiguration: { disablePasswordAuthentication: true, ssh: { publicKeys: [ { path: '/home/azureadmin/.ssh/authorized_keys', keyData: sshPublicKey } ] } }`, Trusted Launch, OS disk `Premium_LRS`, data disk LUN 0 `createOption: 'Empty'`, `diskSizeGB: 64`, `Premium_LRS`, and `customData` built from cloud-init as described in Step 2. Output `fqdn`.
+Params: `location`, `tags` (no `app` tag), `subnetId`, `adminUsername` (`azureadmin`), `sshPublicKey`, `vmSize` (`Standard_D2as_v7`), `dnsLabel` (`nexus-winapp-poc`). Resources: `pip-nexus` (Standard, Static, DNS label), NIC `nic-vm-nexus-01`, VM `vm-nexus-01` with image `Canonical/ubuntu-24_04-lts/server/latest`, `linuxConfiguration: { disablePasswordAuthentication: true, ssh: { publicKeys: [ { path: '/home/azureadmin/.ssh/authorized_keys', keyData: sshPublicKey } ] } }`, Trusted Launch, OS disk `Premium_LRS`, data disk LUN 0 `createOption: 'Empty'`, `diskSizeGB: 64`, `Premium_LRS`, and `customData` built from cloud-init as described in Step 2. Output `fqdn`.
 
 `deploy.sh` additions before `deploy true`:
 ```bash

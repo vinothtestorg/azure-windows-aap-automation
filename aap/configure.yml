@@ -1,0 +1,307 @@
+---
+# AAP configuration as code for the Azure Windows PoC.
+#
+# Talks to the gateway (ansible.platform.* modules, action group
+# group/ansible.platform.gateway) and the controller (ansible.controller.*
+# modules, action group group/ansible.controller.controller) using the host
+# and token exported from .env.aap (TOWER_HOST / TOWER_OAUTH_TOKEN). Both
+# collections accept aap_hostname/aap_token as parameter aliases, so a single
+# pair of module_defaults covers both groups.
+#
+# Run from the repo root:
+#   set -a; . ./.env.aap; set +a
+#   ansible-playbook aap/configure.yml -e aap_project_branch=poc/implementation
+#
+# Most tasks are tagged `base`; the winapp-deploy job template and its
+# svc-github-cd role assignment (Task 8) are tagged `deploy` and can be
+# applied on their own with `--tags deploy` (the two bootstrap fact tasks
+# above are tagged `[base, deploy]` so either tag set still resolves the Key
+# Vault name first).
+- name: Configure AAP objects for the Azure Windows PoC
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars/poc.yml
+
+  module_defaults:
+    group/ansible.platform.gateway:
+      aap_hostname: "{{ lookup('ansible.builtin.env', 'TOWER_HOST') }}"
+      aap_token: "{{ lookup('ansible.builtin.env', 'TOWER_OAUTH_TOKEN') }}"
+    group/ansible.controller.controller:
+      aap_hostname: "{{ lookup('ansible.builtin.env', 'TOWER_HOST') }}"
+      aap_token: "{{ lookup('ansible.builtin.env', 'TOWER_OAUTH_TOKEN') }}"
+
+  tasks:
+    # --- Bootstrap: resolve the Key Vault name once, with a bounded
+    # timeout, instead of leaving it as a live lookup that every later task
+    # would re-run (az can hang on a network stall; infra/scripts/lib.sh's
+    # with_timeout bounds it and kills the whole process group on timeout).
+    # This overrides the vars/poc.yml value; nothing evaluates that raw
+    # lookup because set_fact replaces it before it is ever referenced.
+    - name: Resolve Key Vault name with a bounded timeout
+      ansible.builtin.command:
+        cmd: >-
+          bash -c 'source infra/scripts/lib.sh; with_timeout 120 az deployment group show
+          -g {{ azure_resource_group }} -n main --query properties.outputs.keyVaultName.value -o tsv'
+        chdir: "{{ playbook_dir }}/.."
+      register: _kv_name
+      changed_when: false
+      tags: [base, deploy]
+
+    - name: Cache the resolved Key Vault name for the rest of this run
+      ansible.builtin.set_fact:
+        key_vault_name: "{{ _kv_name.stdout | trim }}"
+      tags: [base, deploy]
+
+    # --- 1. Organization
+    - name: Ensure organization winapp-poc exists
+      ansible.platform.organization:
+        name: "{{ aap_org }}"
+        state: present
+      tags: base
+
+    # --- 2. Team
+    - name: Ensure team cd-automation exists in the org
+      ansible.platform.team:
+        name: "{{ aap_team }}"
+        organization: "{{ aap_org }}"
+        state: present
+      tags: base
+
+    # --- 3. User (password from Key Vault)
+    - name: Read AAP CD user password from Key Vault
+      ansible.builtin.command:
+        cmd: >-
+          bash -c 'source infra/scripts/lib.sh; with_timeout 60 az keyvault secret show
+          --vault-name {{ key_vault_name }} -n aap-svc-github-cd-password --query value -o tsv'
+        chdir: "{{ playbook_dir }}/.."
+      register: _aap_cd_user_password
+      changed_when: false
+      no_log: true
+      tags: base
+
+    - name: Ensure user svc-github-cd exists (not superuser)
+      ansible.platform.user:
+        username: "{{ aap_cd_user }}"
+        password: "{{ _aap_cd_user_password.stdout | trim }}"
+        is_superuser: false
+        update_secrets: false
+        state: present
+      no_log: true
+      tags: base
+
+    # --- 4. Role assignment: Team Member on cd-automation for svc-github-cd
+    - name: Assign Team Member role on cd-automation to svc-github-cd
+      ansible.platform.role_user_assignment:
+        role_definition: "Team Member"
+        object_ids:
+          - "{{ aap_team }}"
+        user: "{{ aap_cd_user }}"
+        state: present
+      tags: base
+
+    # --- 5 & 6. Azure credentials (SP client id/secret from Key Vault,
+    # shared by both the ARM credential and the Key Vault lookup credential)
+    - name: Read Azure SP client id from Key Vault
+      ansible.builtin.command:
+        cmd: >-
+          bash -c 'source infra/scripts/lib.sh; with_timeout 60 az keyvault secret show
+          --vault-name {{ key_vault_name }} -n aap-sp-client-id --query value -o tsv'
+        chdir: "{{ playbook_dir }}/.."
+      register: _azure_sp_client_id
+      changed_when: false
+      no_log: true
+      tags: base
+
+    - name: Read Azure SP client secret from Key Vault
+      ansible.builtin.command:
+        cmd: >-
+          bash -c 'source infra/scripts/lib.sh; with_timeout 60 az keyvault secret show
+          --vault-name {{ key_vault_name }} -n aap-sp-client-secret --query value -o tsv'
+        chdir: "{{ playbook_dir }}/.."
+      register: _azure_sp_client_secret
+      changed_when: false
+      no_log: true
+      tags: base
+
+    - name: Ensure Microsoft Azure Resource Manager credential azure-sp-poc exists
+      ansible.controller.credential:
+        name: "{{ aap_cred_azure_rm }}"
+        organization: "{{ aap_org }}"
+        credential_type: "Microsoft Azure Resource Manager"
+        inputs:
+          subscription: "{{ azure_subscription_id }}"
+          client: "{{ _azure_sp_client_id.stdout | trim }}"
+          secret: "{{ _azure_sp_client_secret.stdout | trim }}"
+          tenant: "{{ azure_tenant_id }}"
+        update_secrets: false
+        state: present
+      no_log: true
+      tags: base
+
+    - name: Ensure Microsoft Azure Key Vault credential azure-kv-poc exists
+      ansible.controller.credential:
+        name: "{{ aap_cred_key_vault }}"
+        organization: "{{ aap_org }}"
+        credential_type: "Microsoft Azure Key Vault"
+        inputs:
+          url: "https://{{ key_vault_name }}.vault.azure.net"
+          client: "{{ _azure_sp_client_id.stdout | trim }}"
+          secret: "{{ _azure_sp_client_secret.stdout | trim }}"
+          tenant: "{{ azure_tenant_id }}"
+        update_secrets: false
+        state: present
+      no_log: true
+      tags: base
+
+    # --- 7. Machine credential (password supplied dynamically via the
+    # credential input source below, never set directly here)
+    - name: Ensure Machine credential win-ansible-svc exists
+      ansible.controller.credential:
+        name: "{{ aap_cred_machine }}"
+        organization: "{{ aap_org }}"
+        credential_type: "Machine"
+        inputs:
+          username: ansible_svc
+        state: present
+      tags: base
+
+    # --- 8. Credential input source: win-ansible-svc password <- Key Vault
+    - name: Wire win-ansible-svc password to the ansible-svc-password KV secret
+      ansible.controller.credential_input_source:
+        target_credential: "{{ aap_cred_machine }}"
+        source_credential: "{{ aap_cred_key_vault }}"
+        input_field_name: password
+        metadata:
+          secret_field: ansible-svc-password
+          secret_version: ""
+        state: present
+      tags: base
+
+    # --- 9. Project
+    - name: Ensure project azure-windows-aap-automation exists
+      ansible.controller.project:
+        name: "{{ aap_project_name }}"
+        organization: "{{ aap_org }}"
+        scm_type: git
+        scm_url: "{{ aap_project_url }}"
+        scm_branch: "{{ aap_project_branch }}"
+        scm_update_on_launch: true
+        scm_clean: true
+        wait: true
+        state: present
+      tags: base
+
+    # --- 10. Inventory
+    - name: Ensure inventory azure-windows-poc exists
+      ansible.controller.inventory:
+        name: "{{ aap_inventory }}"
+        organization: "{{ aap_org }}"
+        state: present
+      register: _inventory
+      tags: base
+
+    # --- 11. Inventory source: azure_rm
+    - name: Ensure inventory source azure-rm exists
+      ansible.controller.inventory_source:
+        name: azure-rm
+        inventory: "{{ aap_inventory }}"
+        organization: "{{ aap_org }}"
+        source: azure_rm
+        credential: "{{ aap_cred_azure_rm }}"
+        overwrite: true
+        update_on_launch: true
+        source_vars:
+          # plain_host_names: without it, the azure_rm inventory plugin
+          # names every host "<vm-name>_<4-hex-char sha1 suffix>" (observed:
+          # vm-winapp-01_c202) to guard against name collisions across
+          # resource groups. This PoC has one VM per name, and ping.yml /
+          # group_vars/windows_web.yml both key off the plain "vm-winapp-01"
+          # host name, so plain names are required here.
+          plain_host_names: true
+          include_vm_resource_groups:
+            - "{{ azure_resource_group }}"
+          exclude_host_filters:
+            - "tags.app is not defined or tags.app != 'demoapp'"
+            - "os_profile.system != 'windows'"
+          conditional_groups:
+            windows_web: "true"
+          hostvar_expressions:
+            ansible_host: "public_dns_hostnames[0]"
+        state: present
+      tags: base
+
+    # --- 12. Role assignment: Inventory Use on azure-windows-poc for svc-github-cd
+    - name: Assign Inventory Use role on azure-windows-poc to svc-github-cd
+      ansible.controller.role_user_assignment:
+        role_definition: "Inventory Use"
+        object_id: "{{ _inventory.id }}"
+        user: "{{ aap_cd_user }}"
+        state: present
+      tags: base
+
+    # --- 13. Job template: winapp-ping
+    - name: Ensure job template winapp-ping exists
+      ansible.controller.job_template:
+        name: "{{ aap_jt_ping }}"
+        organization: "{{ aap_org }}"
+        project: "{{ aap_project_name }}"
+        playbook: ansible/playbooks/ping.yml
+        inventory: "{{ aap_inventory }}"
+        credentials:
+          - "{{ aap_cred_machine }}"
+        ask_limit_on_launch: true
+        state: present
+      tags: base
+
+    # --- 14. Job template: winapp-deploy (Task 8). scm_update_on_launch
+    # only syncs the project when a JOB launches against it, not when this
+    # `ansible.controller.project` ensure-task runs with no other changes -
+    # so a project created/left pointed at poc/implementation by an earlier
+    # run can still be serving an older commit's file tree here. Creating a
+    # job template needs its playbook path to already resolve in that
+    # tree, so force a sync now rather than relying on some earlier,
+    # unrelated launch having happened to pick up ansible/playbooks/deploy.yml.
+    - name: Sync the project so ansible/playbooks/deploy.yml is present before creating winapp-deploy
+      ansible.controller.project_update:
+        name: "{{ aap_project_name }}"
+        organization: "{{ aap_org }}"
+        wait: true
+      # A project refresh pulls the latest commit but never changes any
+      # configured AAP object's state itself, so it must not count toward
+      # this play's changed total - otherwise a second, no-op configure run
+      # would incorrectly report changed>0.
+      changed_when: false
+      tags: deploy
+
+    # Prompts on launch for both extra vars (app_version/artifact_url/
+    # artifact_sha256/git_sha - demoapp_deploy's Global Constraints) and
+    # --limit, never runs two deploys concurrently, and is bounded to 30
+    # minutes server-side.
+    - name: Ensure job template winapp-deploy exists
+      ansible.controller.job_template:
+        name: "{{ aap_jt_deploy }}"
+        organization: "{{ aap_org }}"
+        project: "{{ aap_project_name }}"
+        playbook: ansible/playbooks/deploy.yml
+        inventory: "{{ aap_inventory }}"
+        credentials:
+          - "{{ aap_cred_machine }}"
+        ask_variables_on_launch: true
+        ask_limit_on_launch: true
+        allow_simultaneous: false
+        timeout: 1800
+        state: present
+      register: _jt_deploy
+      tags: deploy
+
+    # --- 15. Role assignment: JobTemplate Execute on winapp-deploy for svc-github-cd
+    - name: Assign JobTemplate Execute role on winapp-deploy to svc-github-cd
+      ansible.controller.role_user_assignment:
+        role_definition: "JobTemplate Execute"
+        object_id: "{{ _jt_deploy.id }}"
+        user: "{{ aap_cd_user }}"
+        state: present
+      tags: deploy

@@ -1,0 +1,210 @@
+---
+# Verifies the AAP objects created by aap/configure.yml actually work:
+# the azure_rm inventory source syncs and finds exactly vm-winapp-01 in the
+# windows_web group, and the winapp-ping job template runs successfully
+# (which also proves the default execution environment ships pypsrp -
+# risk K3).
+#
+# Run from the repo root, after configure.yml:
+#   set -a; . ./.env.aap; set +a
+#   ansible-playbook aap/verify.yml
+- name: Verify AAP inventory sync and ping job for the Azure Windows PoC
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars/poc.yml
+
+  # module_defaults (below) only applies to modules, not to lookup plugins,
+  # so the ansible.controller.controller_api lookup calls further down pass
+  # host/aap_token explicitly from these. The lookup plugin's own `host`
+  # option (unlike the modules') only falls back to env var CONTROLLER_HOST,
+  # not TOWER_HOST, so it cannot be left to auto-detect from .env.aap.
+  vars:
+    _aap_host: "{{ lookup('ansible.builtin.env', 'TOWER_HOST') }}"
+    _aap_token: "{{ lookup('ansible.builtin.env', 'TOWER_OAUTH_TOKEN') }}"
+
+  module_defaults:
+    group/ansible.controller.controller:
+      aap_hostname: "{{ _aap_host }}"
+      aap_token: "{{ _aap_token }}"
+
+  tasks:
+    - name: Sync the azure-rm inventory source
+      ansible.controller.inventory_source_update:
+        name: azure-rm
+        inventory: "{{ aap_inventory }}"
+        organization: "{{ aap_org }}"
+        wait: true
+      register: _inv_sync
+      tags: base
+
+    - name: Assert the inventory sync was successful
+      ansible.builtin.assert:
+        that:
+          - _inv_sync.status == 'successful'
+        fail_msg: "Inventory source sync did not succeed: {{ _inv_sync.status | default('unknown') }}"
+        success_msg: "Inventory source sync succeeded (update id {{ _inv_sync.id }})"
+      tags: base
+
+    - name: Look up the inventory id
+      ansible.builtin.set_fact:
+        _inventory_id: >-
+          {{ lookup('ansible.controller.controller_api', 'inventories', query_params={'name': aap_inventory},
+          return_ids=True, host=_aap_host, aap_token=_aap_token) }}
+      tags: base
+
+    - name: List all hosts in the inventory
+      ansible.builtin.set_fact:
+        _inventory_hosts: >-
+          {{ (query('ansible.controller.controller_api', 'hosts', query_params={'inventory': _inventory_id},
+          host=_aap_host, aap_token=_aap_token)) | map(attribute='name') | list }}
+      tags: base
+
+    - name: Assert the inventory contains exactly vm-winapp-01 (vm-nexus-01 must not appear)
+      ansible.builtin.assert:
+        that:
+          - _inventory_hosts == ['vm-winapp-01']
+        fail_msg: "Inventory {{ aap_inventory }} hosts were {{ _inventory_hosts }}, expected ['vm-winapp-01']"
+        success_msg: "Inventory {{ aap_inventory }} hosts: {{ _inventory_hosts }}"
+      tags: base
+
+    - name: Look up the windows_web group id in this inventory
+      ansible.builtin.set_fact:
+        _windows_web_group_id: >-
+          {{ lookup('ansible.controller.controller_api', 'groups',
+          query_params={'inventory': _inventory_id, 'name': 'windows_web'}, return_ids=True,
+          host=_aap_host, aap_token=_aap_token) }}
+      tags: base
+
+    - name: Assert the windows_web group exists
+      ansible.builtin.assert:
+        that:
+          - _windows_web_group_id | length > 0
+        fail_msg: "No windows_web group found in inventory {{ aap_inventory }}"
+      tags: base
+
+    - name: List hosts in the windows_web group
+      ansible.builtin.set_fact:
+        _windows_web_hosts: >-
+          {{ (query('ansible.controller.controller_api', 'groups/' ~ _windows_web_group_id ~ '/hosts/',
+          host=_aap_host, aap_token=_aap_token)) | map(attribute='name') | list }}
+      tags: base
+
+    - name: Assert vm-winapp-01 is in the windows_web group
+      ansible.builtin.assert:
+        that:
+          - "'vm-winapp-01' in _windows_web_hosts"
+        fail_msg: "windows_web group hosts were {{ _windows_web_hosts }}, expected to contain vm-winapp-01"
+        success_msg: "windows_web group hosts: {{ _windows_web_hosts }}"
+      tags: base
+
+    - name: Launch the winapp-ping job template
+      ansible.controller.job_launch:
+        name: "{{ aap_jt_ping }}"
+        organization: "{{ aap_org }}"
+        wait: true
+      register: _ping_job
+      tags: base
+
+    - name: Assert winapp-ping succeeded
+      ansible.builtin.assert:
+        that:
+          - _ping_job.status == 'successful'
+        fail_msg: "winapp-ping job {{ _ping_job.id }} finished with status {{ _ping_job.status }}"
+        success_msg: "winapp-ping job {{ _ping_job.id }} succeeded"
+      tags: base
+
+    - name: Report verification results
+      ansible.builtin.debug:
+        msg:
+          - "Inventory sync: {{ _inv_sync.status }}"
+          - "Inventory hosts: {{ _inventory_hosts }}"
+          - "windows_web hosts: {{ _windows_web_hosts }}"
+          - "winapp-ping job {{ _ping_job.id }}: {{ _ping_job.status }}"
+      tags: base
+
+    # --- winapp-deploy (Task 8). Launches with the app_version/artifact_url/
+    # artifact_sha256/git_sha extra vars passed on the command line (see
+    # aap/README.md / the run command below - ansible/tests/deploy-scenarios.sh
+    # --prepare-only uploads one fresh good version and prints exactly these
+    # four as JSON for `-e @<(...)`), then fetches the job's own stdout from
+    # the controller API to prove the Nexus reader password (read on the VM
+    # via win_powershell no_log, never by this playbook) never reached job
+    # output either.
+    #
+    #   set -a; . ./.env.aap; set +a
+    #   git push
+    #   ansible-playbook aap/verify.yml --tags deploy -e @<(bash ansible/tests/deploy-scenarios.sh --prepare-only)
+    - name: Resolve Key Vault name with a bounded timeout
+      ansible.builtin.command:
+        cmd: >-
+          bash -c 'source infra/scripts/lib.sh; with_timeout 120 az deployment group show
+          -g {{ azure_resource_group }} -n main --query properties.outputs.keyVaultName.value -o tsv'
+        chdir: "{{ playbook_dir }}/.."
+      register: _kv_name
+      changed_when: false
+      tags: deploy
+
+    - name: Cache the resolved Key Vault name for this run
+      ansible.builtin.set_fact:
+        key_vault_name: "{{ _kv_name.stdout | trim }}"
+      tags: deploy
+
+    - name: Read Nexus reader password from Key Vault (leak check only - never deployed by this playbook)
+      ansible.builtin.command:
+        cmd: >-
+          bash -c 'source infra/scripts/lib.sh; with_timeout 60 az keyvault secret show
+          --vault-name {{ key_vault_name }} -n nexus-reader-password --query value -o tsv'
+        chdir: "{{ playbook_dir }}/.."
+      register: _nexus_reader_password
+      changed_when: false
+      no_log: true
+      tags: deploy
+
+    - name: Launch the winapp-deploy job template
+      ansible.controller.job_launch:
+        name: "{{ aap_jt_deploy }}"
+        organization: "{{ aap_org }}"
+        extra_vars:
+          app_version: "{{ app_version }}"
+          artifact_url: "{{ artifact_url }}"
+          artifact_sha256: "{{ artifact_sha256 }}"
+          git_sha: "{{ git_sha }}"
+        wait: true
+      register: _deploy_job
+      tags: deploy
+
+    - name: Assert winapp-deploy succeeded
+      ansible.builtin.assert:
+        that:
+          - _deploy_job.status == 'successful'
+        fail_msg: "winapp-deploy job {{ _deploy_job.id }} finished with status {{ _deploy_job.status }}"
+        success_msg: "winapp-deploy job {{ _deploy_job.id }} succeeded"
+      tags: deploy
+
+    - name: Fetch the winapp-deploy job stdout from the controller API
+      ansible.builtin.uri:
+        url: "{{ _aap_host }}/api/controller/v2/jobs/{{ _deploy_job.id }}/stdout/?format=txt"
+        headers:
+          Authorization: "Bearer {{ _aap_token }}"
+        validate_certs: false
+        return_content: true
+      register: _deploy_job_stdout
+      no_log: true
+      tags: deploy
+
+    - name: Assert the job stdout does not contain the Nexus reader password
+      ansible.builtin.assert:
+        that:
+          - _nexus_reader_password.stdout | trim not in _deploy_job_stdout.content
+        fail_msg: "winapp-deploy job {{ _deploy_job.id }} stdout contains the Nexus reader password"
+        success_msg: "winapp-deploy job {{ _deploy_job.id }} stdout does not contain the Nexus reader password"
+      no_log: true
+      tags: deploy
+
+    - name: Report deploy verification result
+      ansible.builtin.debug:
+        msg: "winapp-deploy job {{ _deploy_job.id }}: {{ _deploy_job.status }} (stdout leak check passed)"
+      tags: deploy

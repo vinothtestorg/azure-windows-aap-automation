@@ -1,0 +1,14 @@
+---
+- name: Validate launch variables
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - app_version is defined and app_version is match('^\d+\.\d+\.\d+$')
+      - artifact_url is defined and artifact_url is string
+      - artifact_url.startswith(demoapp_allowed_artifact_prefix)
+      - artifact_url.endswith('.zip')
+      - "'..' not in artifact_url and '?' not in artifact_url and '#' not in artifact_url"
+      - artifact_sha256 is defined and artifact_sha256 is match('^[a-f0-9]{64}$')
+      - git_sha == 'unknown' or git_sha is match('^[0-9a-f]{7,40}$')
+      - demoapp_key_vault_name | length > 0
+    fail_msg: "Invalid launch variables: app_version, artifact_url (must be under {{ demoapp_allowed_artifact_prefix }}), artifact_sha256 or git_sha"

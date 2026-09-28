@@ -1,0 +1,22 @@
+---
+- name: Switch current back to the previous release
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'switch-release.ps1') }}"
+    parameters:
+      Root: "{{ demoapp_root }}"
+      TargetPath: "{{ demoapp_previous_release | default('') }}"
+      PoolName: "{{ demoapp_pool_name }}"
+      SiteName: "{{ demoapp_site_name }}"
+  when: demoapp_switched | default(false) and demoapp_previous_release | default('') | length > 0
+
+- name: Recycle the app pool after rollback
+  ansible.windows.win_powershell:
+    script: |
+      param([string]$PoolName)
+      $ErrorActionPreference = 'Stop'
+      Import-Module WebAdministration
+      Restart-WebAppPool -Name $PoolName
+      $Ansible.Changed = $true
+    parameters:
+      PoolName: "{{ demoapp_pool_name }}"
+  when: demoapp_switched | default(false) and demoapp_previous_release | default('') | length > 0

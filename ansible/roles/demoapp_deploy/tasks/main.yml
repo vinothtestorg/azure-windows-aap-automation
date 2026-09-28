@@ -1,0 +1,31 @@
+---
+- name: Validate
+  ansible.builtin.import_tasks: validate.yml
+  tags: [validate]
+
+- name: Deploy with automatic rollback
+  block:
+    - name: Ensure IIS
+      ansible.builtin.import_tasks: iis.yml
+    - name: Fetch artifact
+      ansible.builtin.import_tasks: fetch.yml
+    - name: Switch release
+      ansible.builtin.import_tasks: switch.yml
+    - name: Verify health
+      ansible.builtin.import_tasks: verify.yml
+    - name: Prune old releases
+      ansible.builtin.import_tasks: prune.yml
+    - name: Record success
+      ansible.builtin.include_tasks: record.yml
+      vars:
+        demoapp_result: success
+  rescue:
+    - name: Roll back
+      ansible.builtin.import_tasks: rollback.yml
+    - name: Record failure
+      ansible.builtin.include_tasks: record.yml
+      vars:
+        demoapp_result: "{{ 'rolled_back' if (demoapp_switched | default(false) and demoapp_previous_release | default('') | length > 0) else 'failed' }}"
+    - name: Fail the job
+      ansible.builtin.fail:
+        msg: "Deployment of {{ app_version }} failed: {{ ansible_failed_result.msg | default('see previous task') }}"

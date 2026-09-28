@@ -1,0 +1,15 @@
+---
+- name: Append a deployment record
+  ansible.windows.win_powershell:
+    script: |
+      param([string]$LogPath, [string]$Version, [string]$GitSha, [string]$JobId, [string]$Result)
+      $ErrorActionPreference = 'Stop'
+      $line = "{0:o} version={1} git_sha={2} job={3} result={4}" -f (Get-Date).ToUniversalTime(), $Version, $GitSha, $JobId, $Result
+      Add-Content -Path $LogPath -Value $line
+      $Ansible.Changed = $true
+    parameters:
+      LogPath: "{{ demoapp_root }}\\deployments.log"
+      Version: "{{ app_version }}"
+      GitSha: "{{ git_sha }}"
+      JobId: "{{ demoapp_job_id }}"
+      Result: "{{ demoapp_result }}"
