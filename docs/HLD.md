@@ -177,11 +177,11 @@ Defined in Bicep under `infra/bicep/` (`main.bicep`, `main.bicepparam`, modules 
 | Virtual network | `vnet-winapp-poc` | Subnets `snet-app` (app VM) and `snet-tools` (Nexus). |
 | Network security groups | `nsg-winapp-app`, `nsg-winapp-tools` | Inbound rules in [8](#8-network-and-connectivity). Deny all else. |
 | Public IPs | `pip-winapp-vm`, `pip-nexus` | Standard SKU, static, DNS labels. PoC only. |
-| App VM | `vm-winapp-01` | Windows Server 2022 Datacenter Azure Edition, `Standard_B2ms`, Premium SSD. Tag `app=demoapp`. System-assigned MI. Automatic OS patching. |
-| App VM extension | Custom Script Extension | Runs `configure-remoting.ps1`. It installs IIS and ASP.NET 4.x features, creates the WinRM HTTPS listener on 5986 with a self-signed certificate (PSRP uses the same listener), removes the HTTP 5985 listener, and creates local admin `ansible_svc`. The password is passed as a protected setting from Key Vault. |
-| Nexus VM | `vm-nexus-01` | Ubuntu 24.04 LTS, `Standard_B4ms` (4 vCPU, 16 GiB), 64 GiB Premium SSD data disk. See [5.3](#53-artifact-repository-sonatype-nexus). |
-| Key Vault | `kv-winapp-poc` | RBAC authorization mode, soft delete on. Role assignments are scoped to individual secrets. Secrets are listed in [10](#10-configuration-and-secrets). |
-| User-assigned MI | `id-gh-deployer` | Federated identity credential: issuer `https://token.actions.githubusercontent.com`, subject `repo:vinothtestorg/azure-windows-aap-automation:environment:poc`, audience `api://AzureADTokenExchange`. |
+| App VM | `vm-winapp-01` | Windows Server 2022 Datacenter Azure Edition, `Standard_D2as_v7` with `diskControllerType: NVMe` (as-built: `Standard_B2ms` and every other common B-/D-series size were `NotAvailableForSubscription` on this Free Trial subscription - see [15.1](#151-as-built-2026-09-28)), Premium SSD. Tag `app=demoapp`. System-assigned MI. Automatic OS patching. |
+| App VM extension | `Microsoft.Compute/virtualMachines/runCommands` (as-built: Run Command, not a Custom Script Extension - see [15.1](#151-as-built-2026-09-28)) | Runs `configure-remoting.ps1`. It installs IIS and ASP.NET 4.x features, creates the WinRM HTTPS listener on 5986 with a self-signed certificate (PSRP uses the same listener), removes the HTTP 5985 listener, and creates local admin `ansible_svc`. The password is passed as a protected parameter from Key Vault. |
+| Nexus VM | `vm-nexus-01` | Ubuntu 24.04 LTS, `Standard_D2as_v7` (2 vCPU, 8 GiB) with `diskControllerType: NVMe` (as-built, same reason as the app VM), 64 GiB Premium SSD data disk. See [5.3](#53-artifact-repository-sonatype-nexus). |
+| Key Vault | `kv-winapp-poc` (as-built name: `kv-winapp-poc-afppbe` - Bicep appends a 6-character `uniqueString(resourceGroup().id)` suffix for global uniqueness) | RBAC authorization mode, soft delete on. Role assignments are scoped to individual secrets. Secrets are listed in [10](#10-configuration-and-secrets). |
+| User-assigned MI | `id-gh-deployer` | Federated identity credential: issuer `https://token.actions.githubusercontent.com`, subject `repo:vinothtestorg@289159619/azure-windows-aap-automation@1390388831:environment:poc` (as-built: immutable-ID format - see [15.1](#151-as-built-2026-09-28)), audience `api://AzureADTokenExchange`. |
 | Entra app + SP | `sp-aap-poc` | Created with `az ad sp create-for-rbac` outside Bicep, because Bicep cannot create Entra apps without the Graph extension. Secret expiry 45 days, matching the PoC window. |
 
 Role assignments are listed in [7](#7-identity-and-rbac).
@@ -196,10 +196,10 @@ Role assignments are listed in [7](#7-identity-and-rbac).
 |---|---|
 | Edition | Nexus Repository Community Edition, latest stable release: image `sonatype/nexus3:3.96.3` (2026-09-22, pinned), embedded H2 database. CE usage caps are far above PoC volume. |
 | URL | `https://nexus-winapp-poc.eastus.cloudapp.azure.com` (Azure DNS label on the VM public IP, demo only) |
-| Host | `vm-nexus-01`, Ubuntu 24.04 LTS, `Standard_B4ms` (4 vCPU, 16 GiB). This is below Sonatype's production sizing, which is fine for a handful of artifacts. Nexus data sits on a local managed data disk at `/nexus-data`. Sonatype does not support the embedded database on SMB, NFS or Azure Files. |
+| Host | `vm-nexus-01`, Ubuntu 24.04 LTS, `Standard_D2as_v7` (2 vCPU, 8 GiB; as-built - see [15.1](#151-as-built-2026-09-28)). This is below Sonatype's production sizing, which is fine for a handful of artifacts. Nexus data sits on a local managed data disk at `/nexus-data`. Sonatype does not support the embedded database on SMB, NFS or Azure Files. |
 | Runtime | Docker Compose with Nexus and a Caddy reverse proxy. Caddy obtains a Let's Encrypt certificate for `nexus-winapp-poc.eastus.cloudapp.azure.com`. Nexus port 8081 is not exposed. |
 | Provisioning | Bicep creates the VM, disk, NIC, public IP and NSG. cloud-init installs Docker and starts the Compose stack from `infra/nexus/`. |
-| Bootstrap | `infra/nexus/bootstrap.sh`, run once from the admin workstation, calls the Nexus REST API. It replaces the initial admin password with the Key Vault value and disables anonymous access. It creates the raw hosted repository `demoapp-releases` with write policy "allow once", so a published version cannot be overwritten. It also creates the roles, users and a cleanup policy. |
+| Bootstrap | `infra/nexus/bootstrap.sh`, run once from the admin workstation, calls the Nexus REST API. It replaces the initial admin password with the Key Vault value and disables anonymous access. It creates the raw hosted repository `demoapp-releases` with write policy "allow once", so a published version cannot be overwritten. It also creates the roles and users (as-built: no cleanup policy - dropped as YAGNI for the PoC's tiny, short-lived artifact volume; see [15.1](#151-as-built-2026-09-28)). |
 | Repository layout | `demoapp/<version>/DemoApp-<version>-<sha7>.zip` and `.sha256` |
 | Roles | `demoapp-deployer`: `nx-repository-view-raw-demoapp-releases-add`, `-edit`, `-read`, `-browse`. `demoapp-reader`: `-read`, `-browse`. |
 | Users | `svc-gh-deployer` (role `demoapp-deployer`), `svc-win-reader` (role `demoapp-reader`). The admin user is used only by the bootstrap script. |
@@ -335,7 +335,7 @@ sequenceDiagram
   Dev->>GH: push to main (PR runs CI only)
   GH->>GH: ci.yml: nuget restore, msbuild Release, vstest
   GH->>GH: zip DemoApp-{version}-{sha}.zip + sha256, upload-artifact
-  GH->>Entra: OIDC token, subject repo:vinothtestorg/azure-windows-aap-automation:environment:poc
+  GH->>Entra: OIDC token, subject repo:vinothtestorg@289159619/azure-windows-aap-automation@1390388831:environment:poc
   Entra-->>GH: access token for UAMI id-gh-deployer
   GH->>KV: get secret nexus-deployer-password
   GH->>NX: PUT zip and .sha256 as svc-gh-deployer
@@ -516,11 +516,13 @@ Then repeat the same role assignments for `id-aap-exec` and delete the SP. Playb
 | `nexus-admin-password` | Key Vault | Secret | Nexus bootstrap only |
 | `nexus-deployer-password` | Key Vault | Secret | GitHub CD (UAMI) |
 | `nexus-reader-password` | Key Vault | Secret | App VM (system MI) |
-| `ansible-svc-password` | Key Vault | Secret | Custom Script Extension at deploy, AAP Machine credential lookup (SP) |
+| `ansible-svc-password` | Key Vault | Secret | VM Run Command at deploy (as-built: replaces the Custom Script Extension originally planned here, see [15.1](#151-as-built-2026-09-28)), AAP Machine credential lookup (SP) |
 | `vm-admin-password` | Key Vault | Secret | Bicep `getSecret()` at deploy, break-glass RDP |
+| `aap-sp-client-id`, `aap-sp-client-secret` *(as-built)* | Key Vault | Secret | `aap/configure.yml` reads these to populate the `azure-sp-poc`/`azure-kv-poc` AAP credentials. Not in the original design, which stored the SP secret only inside AAP ([15.1](#151-as-built-2026-09-28)). |
+| `aap-svc-github-cd-password` *(as-built)* | Key Vault | Secret | `aap/configure.yml` reads this to set the AAP user `svc-github-cd`'s password, and `infra/scripts/setup-github-env.sh` reads it to mint `TOWER_OAUTH_TOKEN` |
 | Allowed artifact prefix | `ansible/roles/demoapp_deploy/defaults/main.yml` | Config | Playbook validation |
 
-For local work, the AAP variables go in an untracked `.env.aap` file that is listed in `.gitignore`. The repository is public, so no secret is ever committed.
+For local work, the AAP variables go in an untracked `.env.aap` file that is listed in `.gitignore`. The repository is public, so no secret is ever committed. As built, `.env.aap` names the Automation Hub token variable `AUTOMATION_HUB_TOKEN`; it is exported as `ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_TOKEN` at run time (`set -a; . ./.env.aap; set +a; export ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_TOKEN="$AUTOMATION_HUB_TOKEN"`) rather than being stored under that longer name directly.
 
 ## 11. Deployment strategy
 
@@ -528,7 +530,7 @@ For local work, the AAP variables go in an untracked `.env.aap` file that is lis
 
 - Version: `1.0.<GITHUB_RUN_NUMBER>`, plus the short git SHA.
 - Nexus path: `demoapp-releases/demoapp/<version>/DemoApp-<version>-<sha7>.zip` and `.sha256`.
-- Each version can be written only once (write policy "allow once"). A Nexus cleanup policy removes components that have not been downloaded for 30 days.
+- Each version can be written only once (write policy "allow once"). Re-uploading an existing path returns HTTP 409 (as-built: not 400 as originally assumed - see [15.1](#151-as-built-2026-09-28)). As built, no Nexus cleanup policy exists: dropped as YAGNI given the PoC's tiny, short-lived artifact volume ([15.1](#151-as-built-2026-09-28)); old components are removed only by [teardown](runbooks/teardown.md).
 
 ### 11.2 Rollout and rollback
 
@@ -743,7 +745,7 @@ None block the PoC. Target-state values are dummy placeholders ([13.4](#134-targ
 | Q4 | Sandbox egress IPs | Not needed. 5986 is open to the internet for the PoC (K1 accepted). The sandbox is the 30-day Red Hat Developer Sandbox. |
 | Q5 | Target AAP | AAP Developer Sandbox for the PoC, AAP on Azure for the implementation |
 | – | Artifact store | Nexus replaces Blob ([5.3](#53-artifact-repository-sonatype-nexus)) |
-| Q6 | GitHub owner | Organization `vinothtestorg`. Federated subject `repo:vinothtestorg/azure-windows-aap-automation:environment:poc`. |
+| Q6 | GitHub owner | Organization `vinothtestorg`. Federated subject `repo:vinothtestorg@289159619/azure-windows-aap-automation@1390388831:environment:poc` (as-built: GitHub issues immutable-ID subjects for this org/repo, not the `repo:org/repo:...` form originally assumed - see [15.1](#151-as-built-2026-09-28)). |
 | Q7 | AAP on Azure deployment model | Enterprise standard: Red Hat's tested container enterprise topology for AAP 2.7 on RHEL VMs in Azure ([13.1](#131-enterprise-topology-on-azure)) |
 | Q8 | Nexus URL and edition | PoC: `https://nexus-winapp-poc.eastus.cloudapp.azure.com`, Community Edition latest stable. The organisation Nexus is used at implementation. |
 | Q9 | Target subscriptions and Nexus | AAP and RHEL subscriptions are already in place in the enterprise. The organisation Nexus is Sonatype Nexus Repository Cloud (SaaS), already purchased. Target URLs are dummy placeholders ([13.4](#134-target-placeholders)). |
@@ -780,6 +782,29 @@ None block the PoC. Target-state values are dummy placeholders ([13.4](#134-targ
 | P6 | R9, R10, R11 | Full validation plan, diagrams updated to as-built | V1–V9 pass (D6, D7) |
 | P7 | – | Decommission the PoC resource group. Plan the target state. | PoC resources deleted |
 
+### 15.1 As built (2026-09-28)
+
+The PoC (P0–P6) is complete: V1–V9 all pass ([runbooks/validation.md](runbooks/validation.md)). Implementation surfaced the following deviations from the design above, each recorded as a ruling in the SDD ledger during delivery:
+
+| Area | Designed | As built | Why |
+|---|---|---|---|
+| VM size (both VMs) | Nexus VM `Standard_B2ms`/`Standard_B4ms`, app VM `Standard_B2ms` | Both `vm-winapp-01` and `vm-nexus-01` on `Standard_D2as_v7` with `storageProfile.diskControllerType: NVMe` | Every common B-/D-series size (including the originally planned ones) came back `SkuNotAvailable`/`NotAvailableForSubscription` on this Free Trial subscription. `Standard_D2as_v7` was unrestricted and had quota (`StandardDasv7Family` 4/4 cores fit two 2-vCPU VMs); it requires the NVMe disk controller instead of SCSI, which both the Windows Server 2022 Azure Edition and Ubuntu 24.04 images support. |
+| App VM configuration | Custom Script Extension | `Microsoft.Compute/virtualMachines/runCommands` (Run Command), same `configure-remoting.ps1`, password passed as a protected parameter | Functionally equivalent for this PoC; no design impact. |
+| DemoApp project format | Not specified in detail | SDK-style MVC project via `MSBuild.SDK.SystemWeb`, `HomeController` returns `ContentResult` (no Razor views) | Verified by a local compile spike; keeps the build simple without a view engine the demo doesn't need. |
+| `ansible.cfg` location | `ansible/ansible.cfg` | Repository root (`./ansible.cfg`) | AAP's project sync runs playbooks from the project root, so a root-level `ansible.cfg` is the one that actually applies to launched jobs. |
+| `group_vars` location | `ansible/inventories/poc/group_vars/windows_web.yml` | `ansible/playbooks/group_vars/windows_web.yml` | Matches where `ansible-playbook` resolves `group_vars` relative to the playbooks actually run (both locally and by AAP's project sync). |
+| Key Vault secrets | `nexus-*`, `ansible-svc-password`, `vm-admin-password` only; the SP secret lives only inside AAP credentials | Also stores `aap-sp-client-id`, `aap-sp-client-secret` and `aap-svc-github-cd-password` (see [10](#10-configuration-and-secrets)) | `aap/configure.yml` needs to read these values to configure AAP objects as code (SP-backed credentials, the `svc-github-cd` user password) without ever hardcoding them in a playbook or var file. Extra copies stay inside the same deployer-only vault. |
+| Nexus cleanup policy | A cleanup policy removes components not downloaded for 30 days | No cleanup policy | Dropped as YAGNI: PoC artifact volume is tiny and short-lived, and everything can be rebuilt from git. Documented as a manual step in [runbooks/teardown.md](runbooks/teardown.md) instead. |
+| Nexus redeploy response | Assumed HTTP 400 | HTTP 409 (Conflict) | The `ALLOW_ONCE` write policy's actual response code, confirmed live (V8, [infra/nexus/tests/smoke.sh](../infra/nexus/tests/smoke.sh)). `.github/scripts/nexus-upload.sh` and `ansible/tests/deploy-scenarios.sh` both key their idempotency logic off 409. |
+| VM auto-shutdown | Not fixed in the original design | Azure VM auto-shutdown schedule, daily at 18:00 UTC (`shutdownTimeUtc = '1800'` in `infra/bicep/modules/vm-windows.bicep`) | Cost control between test windows, called out as a workstation quirk for anyone running the validation/deploy scripts later in the day. |
+| GitHub OIDC subject | `repo:vinothtestorg/azure-windows-aap-automation:environment:poc` | `repo:vinothtestorg@289159619/azure-windows-aap-automation@1390388831:environment:poc` | This GitHub org/repo issues **immutable-ID** OIDC subjects (`use_default=true`, `use_immutable_subject=true`), not the mutable `org/repo` form originally assumed. The federated credential on `id-gh-deployer` was rebuilt with the immutable subject (`githubOrgId` 289159619 + `githubRepoId` 1390388831); the first CD run against `main` failed with `AADSTS700213` until this fix (commit `68d1ccd`). Kept over renaming/recreating the repo, since the immutable form survives a future repo rename. |
+| `az`/`az`-wrapping process management | Not addressed in the design | `infra/scripts/lib.sh`'s `with_timeout` forks the command into its own process group (`setpgrp`) and signals the whole group on timeout | A plain `perl -e 'alarm ...; exec ...'` wrapper only kills the direct child. The Homebrew `az` CLI wrapper on the workstation forks a `python3 -m azure.cli` grandchild instead of `exec`-ing it; on a timeout, the grandchild survived and kept the caller's captured stdout pipe open, hanging every command substitution around `az` indefinitely. Load-bearing for every script in Tasks 6–10 that shells out to `az`. |
+| Azure RM dynamic inventory host naming | `hostnames: public_dns_hostnames` | `plain_host_names: true` plus `hostvar_expressions: {ansible_host: "public_dns_hostnames[0]"}`; inventory hostname is the plain VM name | Without `plain_host_names`, the `azure_rm` inventory plugin suffixes every host with a 4-hex-character hash (e.g. `vm-winapp-01_c202`) to guard against cross-resource-group name collisions. `ping.yml` and `group_vars/windows_web.yml` both key off the plain `vm-winapp-01` host name, and this PoC has exactly one VM per name, so plain names are required. |
+| AAP project sync before `winapp-deploy` creation | Rely on `scm_update_on_launch` | An explicit forced `ansible.controller.project_update` task, `changed_when: false` | `scm_update_on_launch` only syncs a project when a *job* launches against it, not when the `ansible.controller.project` ensure-task itself runs with no other changes - so a project left pointed at an older commit could still be missing `ansible/playbooks/deploy.yml` when `configure.yml` tries to create the `winapp-deploy` job template against it. The forced sync is marked `changed_when: false` because a refresh is not itself a configuration change (a genuine sync failure still fails the task on its own). |
+| Release switch and app pool | Not addressed in the design | `switch-release.ps1` stops the IIS app pool, waits (bounded) for it to reach `Stopped`, swaps the `current` junction, then starts the pool again; throws if the pool does not stop | Windows/IIS holds file handles into the active release directory while the pool is running. Swapping the junction without stopping the pool first left a version live whose on-disk files had already been replaced/removed, serving stale or broken content until the next request cycle. |
+| Secrets passed as process arguments | Not addressed in the design | Accepted for the PoC: `az keyvault secret set --value ...`, `curl -u user:pass`, etc. pass secret values as command-line arguments (visible to other processes on the same host for the argv's lifetime, though never logged, printed or committed) | Single-user workstation and ephemeral GitHub-hosted runners only; every script still avoids echoing or writing these values anywhere. Recorded here as a known PoC limitation - the target state (AAP-native or Key Vault-referenced secrets end to end) would remove it. |
+| Key Vault name | `kv-winapp-poc` | `kv-winapp-poc-afppbe` (Bicep appends a 6-character `uniqueString(resourceGroup().id)` suffix for global uniqueness) | Key Vault names are globally unique across Azure; the fixed name from the design was very likely already taken. |
+
 ## 16. Proposed repository layout
 
 ```text
@@ -814,6 +839,8 @@ azure-windows-aap-automation/
 ├── .gitignore            includes .env.aap
 └── requirement/requirement.md
 ```
+
+**As built, two paths differ from the tree above** (see [15.1](#151-as-built-2026-09-28)): `ansible.cfg` lives at the repository root, not under `ansible/` (AAP's project sync runs playbooks from the project root, so a root-level `ansible.cfg` is the one that actually applies), and `group_vars/windows_web.yml` lives under `ansible/playbooks/group_vars/`, not under `ansible/inventories/poc/`.
 
 ## Appendix A: References
 
