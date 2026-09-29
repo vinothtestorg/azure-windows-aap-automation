@@ -10,7 +10,12 @@
 #
 # Run from the repo root:
 #   set -a; . ./.env.aap; set +a
-#   ansible-playbook aap/configure.yml -e aap_project_branch=poc/implementation
+#   ansible-playbook aap/configure.yml
+#
+# aap_project_branch defaults to `main` (vars/poc.yml) - the AAP project
+# tracks main. Pass -e aap_project_branch=<branch> only as a development aid
+# to point the AAP project at a task branch before it merges; do not leave
+# it pinned to a branch other than main.
 #
 # Most tasks are tagged `base`; the winapp-deploy job template and its
 # svc-github-cd role assignment (Task 8) are tagged `deploy` and can be
@@ -87,7 +92,10 @@
         username: "{{ aap_cd_user }}"
         password: "{{ _aap_cd_user_password.stdout | trim }}"
         is_superuser: false
-        update_secrets: false
+        # I5: false is idempotent (never resets the password on a plain
+        # re-run); set -e aap_update_secrets=true after rotating
+        # aap-svc-github-cd-password in Key Vault to push the new value.
+        update_secrets: "{{ aap_update_secrets }}"
         state: present
       no_log: true
       tags: base
@@ -136,7 +144,9 @@
           client: "{{ _azure_sp_client_id.stdout | trim }}"
           secret: "{{ _azure_sp_client_secret.stdout | trim }}"
           tenant: "{{ azure_tenant_id }}"
-        update_secrets: false
+        # I5: see the update_secrets comment on the svc-github-cd user above -
+        # same idempotent-by-default, opt-in-rotation pattern.
+        update_secrets: "{{ aap_update_secrets }}"
         state: present
       no_log: true
       tags: base
@@ -151,7 +161,7 @@
           client: "{{ _azure_sp_client_id.stdout | trim }}"
           secret: "{{ _azure_sp_client_secret.stdout | trim }}"
           tenant: "{{ azure_tenant_id }}"
-        update_secrets: false
+        update_secrets: "{{ aap_update_secrets }}"
         state: present
       no_log: true
       tags: base
@@ -276,10 +286,23 @@
       changed_when: false
       tags: deploy
 
-    # Prompts on launch for both extra vars (app_version/artifact_url/
-    # artifact_sha256/git_sha - demoapp_deploy's Global Constraints) and
-    # --limit, never runs two deploys concurrently, and is bounded to 30
-    # minutes server-side.
+    # I1 fix: a plain `ask_variables_on_launch: true` with no survey let any
+    # token holder pass ANY extra_vars key at launch - not just the four
+    # deploy.yml expects, but also role defaults such as
+    # demoapp_allowed_artifact_prefix (redirect the artifact fetch/creds to
+    # an attacker URL) or ansible_host/ansible_psrp_* (redirect the whole
+    # play at a different host). A survey with exactly these four required
+    # text questions, plus `ask_variables_on_launch: false`, makes AAP
+    # accept and pass through only these four keys at launch and silently
+    # drop everything else - so an attacker-supplied
+    # demoapp_allowed_artifact_prefix (or any other override) never reaches
+    # the play at all. ansible/roles/demoapp_deploy/tasks/validate.yml stays
+    # as defence in depth (format/prefix checks on the four values
+    # themselves). Confirmed empirically (V7-bis, docs/runbooks/
+    # validation.md): AAP 2.7 still accepts these four as `extra_vars` in
+    # the job_templates/{id}/launch/ POST body even with
+    # ask_variables_on_launch false, because they match survey variable
+    # names - .github/scripts/aap-launch.sh and cd.yml need no change.
     - name: Ensure job template winapp-deploy exists
       ansible.controller.job_template:
         name: "{{ aap_jt_deploy }}"
@@ -289,10 +312,51 @@
         inventory: "{{ aap_inventory }}"
         credentials:
           - "{{ aap_cred_machine }}"
-        ask_variables_on_launch: true
+        ask_variables_on_launch: false
         ask_limit_on_launch: true
         allow_simultaneous: false
         timeout: 1800
+        survey_enabled: true
+        survey_spec:
+          name: "winapp-deploy launch variables"
+          description: >-
+            Exactly the four variables demoapp_deploy needs. AAP drops any
+            other extra_vars key posted at launch since
+            ask_variables_on_launch is false, so this - not launch-time
+            extra_vars - is the only way to reach the play's variables.
+          spec:
+            - question_name: "Application version"
+              question_description: "e.g. 1.0.42 - re-checked against ^\\d+\\.\\d+\\.\\d+$ by validate.yml"
+              variable: app_version
+              type: text
+              required: true
+              min: 0
+              max: 32
+              default: ""
+            - question_name: "Artifact URL"
+              question_description: "Full Nexus URL to the release zip - re-checked against the allowed prefix by validate.yml"
+              variable: artifact_url
+              type: text
+              required: true
+              min: 0
+              max: 512
+              default: ""
+            - question_name: "Artifact SHA-256"
+              question_description: "64 lowercase hex characters"
+              variable: artifact_sha256
+              type: text
+              required: true
+              min: 64
+              max: 64
+              default: ""
+            - question_name: "Git commit SHA"
+              question_description: "Short or full git SHA, or 'unknown'"
+              variable: git_sha
+              type: text
+              required: true
+              min: 0
+              max: 40
+              default: ""
         state: present
       register: _jt_deploy
       tags: deploy

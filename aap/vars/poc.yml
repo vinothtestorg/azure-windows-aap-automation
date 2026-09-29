@@ -11,6 +11,11 @@ aap_cred_key_vault: azure-kv-poc
 aap_cred_machine: win-ansible-svc
 aap_jt_ping: winapp-ping
 aap_jt_deploy: winapp-deploy
+# I5: set true (-e aap_update_secrets=true) only right after rotating a
+# secret (infra/scripts/create-aap-sp.sh --rotate) to push the new value
+# into AAP; false is idempotent and never overwrites the secret fields AAP
+# already holds. See docs/runbooks/sp-rotation.md.
+aap_update_secrets: false
 azure_subscription_id: 03b6c75f-a3f1-429f-ab89-0f9b07087638
 azure_tenant_id: e31db877-05a5-4e5a-acfe-c0384e23172a
 azure_resource_group: rg-winapp-poc
