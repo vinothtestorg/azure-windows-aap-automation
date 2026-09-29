@@ -34,7 +34,7 @@ log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 # -$pid`) so any grandchildren die too, not just the direct child.
 with_timeout() {
   local secs="$1"; shift
-  local status=0
+  local rc=0
   perl -e '
     my $t = shift @ARGV;
     my $pid = fork();
@@ -57,11 +57,11 @@ with_timeout() {
     my $status = $?;
     if ($status & 127) { exit(128 + ($status & 127)); }
     exit($status >> 8);
-  ' "$secs" "$@" || status=$?
-  if [[ "$status" -eq 142 ]]; then
+  ' "$secs" "$@" || rc=$?
+  if [[ "$rc" -eq 142 ]]; then
     log "timed out after ${secs}s: $*"
   fi
-  return "$status"
+  return "$rc"
 }
 
 require_az_login() {

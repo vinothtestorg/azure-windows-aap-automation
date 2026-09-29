@@ -26,7 +26,7 @@ flowchart TB
       sp["SP sp-aap-poc<br/>(PoC fallback)"]
     end
     subgraph rg["Resource group rg-winapp-poc"]
-      kv["Key Vault kv-winapp-poc<br/>Nexus, ansible_svc, admin secrets"]
+      kv["Key Vault kv-winapp-poc-afppbe<br/>Nexus, ansible_svc, admin secrets"]
       subgraph vnet["VNet vnet-winapp-poc"]
         subgraph snapp["snet-app + NSG"]
           pip["Public IP + DNS label"]

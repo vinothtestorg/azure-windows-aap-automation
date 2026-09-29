@@ -14,8 +14,10 @@
 #   bash ansible/tests/deploy-scenarios.sh                 # run all scenarios
 #   bash ansible/tests/deploy-scenarios.sh unhealthy no_secret_leak   # run only
 #     the named scenarios, in the order given (any of validation, good,
-#     idempotent, bad_checksum, unhealthy, first_deploy_failure,
-#     no_secret_leak). bad_checksum/unhealthy compare the live /version
+#     idempotent, checksum_drift, bad_checksum, unhealthy,
+#     first_deploy_failure, no_secret_leak). checksum_drift, like
+#     idempotent, needs `good` to have run earlier in the SAME invocation.
+#     bad_checksum/unhealthy compare the live /version
 #     against whatever it was when the script started if `good` was not
 #     part of this run, so a targeted re-run after an interruption still
 #     checks the right baseline.
@@ -316,6 +318,39 @@ scenario_idempotent() {
   pass "$name"
 }
 
+# M4(a) regression test: relaunching an already-fetched version (releases\
+# <version>\.complete exists) with a different, still well-formed
+# artifact_sha256 must fail, not silently reuse the on-disk bytes. Requires
+# `good` to have run first in this invocation (reuses its release, no new
+# upload needed).
+scenario_checksum_drift() {
+  local name="checksum_drift"
+  if [[ -z "${GOOD_URL:-}" ]]; then fail "$name" "good scenario did not run first"; return; fi
+
+  # Flip the first hex digit of GOOD_SHA256 to get a different, still
+  # valid-format (64 lowercase hex chars) checksum.
+  local wrong_sha
+  case "${GOOD_SHA256:0:1}" in
+    a) wrong_sha="b${GOOD_SHA256:1}" ;;
+    *) wrong_sha="a${GOOD_SHA256:1}" ;;
+  esac
+
+  local logfile="$CAPTURE_DIR/checksum_drift.log"
+  if with_timeout 300 ansible-playbook "$DEPLOY_PLAYBOOK" \
+      -e app_version="$GOOD_VERSION" -e artifact_url="$GOOD_URL" -e artifact_sha256="$wrong_sha" -e git_sha="$CI_HEAD_SHA" \
+      </dev/null >"$logfile" 2>&1; then
+    fail "$name" "ansible-playbook unexpectedly succeeded relaunching already-fetched $GOOD_VERSION with a mismatched (but valid-format) sha256, see $logfile"; return
+  fi
+  if ! grep -q "checksum mismatch" "$logfile"; then
+    fail "$name" "expected 'checksum mismatch' in the output for the already-fetched release, see $logfile"; return
+  fi
+  local v; v="$(remote_version)"
+  if [[ "$v" != "$GOOD_VERSION" ]]; then
+    fail "$name" "/version is '$v', expected it unchanged at $GOOD_VERSION"; return
+  fi
+  pass "$name"
+}
+
 scenario_bad_checksum() {
   local name="bad_checksum"
   repackage "$BAD_CHECKSUM_VERSION" 0
@@ -438,7 +473,7 @@ fi
 
 # Any positional args name the scenarios to run, in the order given (see the
 # usage comment at the top); with none, run all seven in the fixed order.
-readonly ALL_SCENARIOS=(validation good idempotent bad_checksum unhealthy first_deploy_failure no_secret_leak)
+readonly ALL_SCENARIOS=(validation good idempotent checksum_drift bad_checksum unhealthy first_deploy_failure no_secret_leak)
 if [[ "$#" -gt 0 ]]; then
   SELECTED=("$@")
   for s in "${SELECTED[@]}"; do

@@ -4,34 +4,101 @@
     path: "{{ demoapp_root }}\\releases\\{{ app_version }}\\.complete"
   register: demoapp_release_stat
 
+# M4(a) fix: .complete used to be an empty marker file, so a release
+# directory left over from an earlier deploy of this SAME version short-
+# circuited the download/checksum steps below unconditionally - a relaunch
+# with a different (but still well-formed) artifact_sha256 was silently
+# accepted without ever being checked against what is actually on disk.
+# .complete now holds the sha256 that was verified when the release was
+# fetched; when the marker exists, compare it against this launch's
+# artifact_sha256 and fail (not silently reuse) on any mismatch.
+- name: Read the checksum recorded in the .complete marker, if already fetched
+  ansible.windows.win_powershell:
+    script: |
+      param([string]$Path)
+      $Ansible.Changed = $false
+      $sha = ''
+      if (Test-Path $Path) {
+          # Get-Content -Raw on a 0-byte file returns $null (a pre-fix,
+          # empty-marker release directory left on disk from before this
+          # change): guard the .Trim() call so that reads as an empty
+          # string, not a crash - the mismatch check below then correctly
+          # refuses to trust a marker with no recorded hash.
+          $raw = Get-Content -Raw -Path $Path
+          if ($raw) { $sha = $raw.Trim() }
+      }
+      $Ansible.Result = @{ sha256 = $sha }
+    parameters:
+      Path: "{{ demoapp_root }}\\releases\\{{ app_version }}\\.complete"
+  register: demoapp_recorded
+  when: demoapp_release_stat.stat.exists
+
+- name: Verify the already-fetched release's recorded checksum matches this launch's artifact_sha256
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - demoapp_recorded.result.sha256 == artifact_sha256
+    fail_msg: >-
+      checksum mismatch: releases\{{ app_version }} is already present, recorded with sha256
+      {{ demoapp_recorded.result.sha256 }}, but this launch's artifact_sha256 is {{ artifact_sha256 }}
+  when: demoapp_release_stat.stat.exists
+
 - name: Compute the staging zip path
   ansible.builtin.set_fact:
     demoapp_staging_zip: "{{ demoapp_root }}\\staging\\DemoApp-{{ app_version }}.zip"
 
+# M4(c) fix: this task stays no_log (it handles the Nexus reader password),
+# but no_log used to hide ALL diagnostic text on failure too, leaving an
+# operator with zero information about why a deploy failed. The script now
+# catches every failure itself and writes only safe fields (an HTTP status
+# code when one was received, and the artifact URL - never the password or
+# the Authorization header) into $Ansible.Msg; the follow-up task below
+# (not no_log) surfaces that sanitised message.
 - name: Download the release artifact from Nexus
   ansible.windows.win_powershell:
     script: |
       param([string]$KeyVaultName, [string]$SecretName, [string]$NexusUser, [string]$ArtifactUrl, [string]$OutFile)
       $ErrorActionPreference = 'Stop'
-      $imdsUri = 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net'
-      $token = $null
-      for ($i = 1; $i -le 5 -and -not $token; $i++) {
-          try { $token = (Invoke-RestMethod -Headers @{Metadata='true'} -Uri $imdsUri).access_token }
-          catch { if ($i -eq 5) { throw 'IMDS token request failed' }; Start-Sleep -Seconds 10 }
+      try {
+          $imdsUri = 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net'
+          $token = $null
+          for ($i = 1; $i -le 5 -and -not $token; $i++) {
+              try { $token = (Invoke-RestMethod -Headers @{Metadata='true'} -Uri $imdsUri).access_token }
+              catch { if ($i -eq 5) { throw 'IMDS token request failed' }; Start-Sleep -Seconds 10 }
+          }
+          $secretUri = "https://$KeyVaultName.vault.azure.net/secrets/${SecretName}?api-version=7.4"
+          $password = (Invoke-RestMethod -Headers @{Authorization="Bearer $token"} -Uri $secretUri).value
+          $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${NexusUser}:${password}"))
+          Invoke-WebRequest -UseBasicParsing -Headers @{Authorization="Basic $basic"} -Uri $ArtifactUrl -OutFile $OutFile
+          $Ansible.Changed = $true
       }
-      $secretUri = "https://$KeyVaultName.vault.azure.net/secrets/${SecretName}?api-version=7.4"
-      $password = (Invoke-RestMethod -Headers @{Authorization="Bearer $token"} -Uri $secretUri).value
-      $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${NexusUser}:${password}"))
-      Invoke-WebRequest -UseBasicParsing -Headers @{Authorization="Basic $basic"} -Uri $ArtifactUrl -OutFile $OutFile
-      $Ansible.Changed = $true
+      catch {
+          $statusCode = $null
+          if ($_.Exception.Response) {
+              try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+          }
+          $Ansible.Failed = $true
+          if ($statusCode) {
+              $Ansible.Msg = "download from Nexus failed: HTTP $statusCode requesting $ArtifactUrl"
+          } else {
+              $Ansible.Msg = "download from Nexus failed before an HTTP response (network error, or IMDS/Key Vault read failed) for $ArtifactUrl"
+          }
+      }
     parameters:
       KeyVaultName: "{{ demoapp_key_vault_name }}"
       SecretName: "{{ demoapp_nexus_reader_secret }}"
       NexusUser: "{{ demoapp_nexus_reader_user }}"
       ArtifactUrl: "{{ artifact_url }}"
       OutFile: "{{ demoapp_staging_zip }}"
+  register: demoapp_download
   no_log: true
+  failed_when: false
   when: not demoapp_release_stat.stat.exists
+
+- name: Fail with a sanitised message if the Nexus download failed
+  ansible.builtin.fail:
+    msg: "{{ demoapp_download.msg | default('download of the release artifact from Nexus failed') }}"
+  when: not demoapp_release_stat.stat.exists and (demoapp_download.failed | default(false))
 
 - name: Checksum the downloaded artifact
   ansible.windows.win_stat:
@@ -49,21 +116,33 @@
     fail_msg: "checksum mismatch"
   when: not demoapp_release_stat.stat.exists
 
+# M4(b) fix: Rename-Item fails when releases\<version> already exists (e.g.
+# a release left by the manual first deployment, or a prior run that
+# downloaded/unzipped but never reached the old empty .complete marker) -
+# there was no .complete, so demoapp_release_stat.stat.exists was false and
+# this task ran, but the rename onto an existing directory raised
+# "Cannot create... because a file or folder with the same name already
+# exists." Remove that specific releases\<version> directory first (never
+# touch `current`) so the rename always lands cleanly, then record the
+# verified checksum (already matched against artifact_sha256 above) into
+# .complete.
 - name: Expand the artifact into the release directory
   ansible.windows.win_powershell:
     script: |
-      param([string]$ReleasesDir, [string]$Version, [string]$ZipPath)
+      param([string]$ReleasesDir, [string]$Version, [string]$ZipPath, [string]$Sha256)
       $ErrorActionPreference = 'Stop'
       $target = Join-Path $ReleasesDir $Version
       $tmp = "$target.tmp"
       if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
       Expand-Archive -Path $ZipPath -DestinationPath $tmp
+      if (Test-Path $target) { Remove-Item -Recurse -Force $target }
       Rename-Item -Path $tmp -NewName $Version
-      New-Item -ItemType File -Path (Join-Path $target '.complete') -Force | Out-Null
+      Set-Content -Path (Join-Path $target '.complete') -Value $Sha256 -NoNewline
       Remove-Item -Force $ZipPath
       $Ansible.Changed = $true
     parameters:
       ReleasesDir: "{{ demoapp_root }}\\releases"
       Version: "{{ app_version }}"
       ZipPath: "{{ demoapp_staging_zip }}"
+      Sha256: "{{ artifact_sha256 }}"
   when: not demoapp_release_stat.stat.exists

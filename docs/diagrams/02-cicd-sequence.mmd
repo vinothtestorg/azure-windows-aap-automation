@@ -9,12 +9,12 @@ sequenceDiagram
   participant VM as Windows VM (IIS)
 
   Dev->>GH: push to main (PR runs CI only)
-  GH->>GH: ci.yml: nuget restore, msbuild Release, vstest
+  GH->>GH: ci.yml: msbuild restore+build Release, dotnet test, msbuild publish (_PackageTempDir)
   GH->>GH: zip DemoApp-{version}-{sha}.zip + sha256, upload-artifact
-  GH->>Entra: OIDC token, subject repo:vinothtestorg/azure-windows-aap-automation:environment:poc
+  GH->>Entra: OIDC token, subject repo:vinothtestorg@289159619/azure-windows-aap-automation@1390388831:environment:poc
   Entra-->>GH: access token for UAMI id-gh-deployer
   GH->>KV: get secret nexus-deployer-password
-  GH->>NX: PUT zip and .sha256 as svc-gh-deployer
+  GH->>NX: PUT .sha256 then zip as svc-gh-deployer
   GH->>AAP: POST /api/controller/v2/job_templates/{id}/launch/ with extra_vars
   AAP-->>GH: job id
   Note over GH,AAP: cd.yml polls /api/controller/v2/jobs/{id}/ until finished

@@ -57,9 +57,18 @@ jobs:
           NEXUS_USER: svc-gh-deployer
           NEXUS_PASSWORD: ${{ steps.nexus.outputs.password }}
         run: |
+          # Upload the .sha256 sidecar before the zip: nexus-upload.sh's 409
+          # (already-uploaded) handling for the zip itself works by fetching
+          # this sidecar and comparing hashes, so it must exist first. If the
+          # zip upload below fails partway (network blip, runner killed), a
+          # re-run's zip attempt can still find the sidecar and safely treat
+          # a matching 409 as already-done. Uploading the zip first would
+          # leave a permanent, un-recoverable 409 mismatch on any re-run
+          # whose sidecar upload never got a chance to run (Nexus's
+          # ALLOW_ONCE policy means the zip path can never be overwritten).
           remote="demoapp/${{ inputs.version }}/${{ inputs.package_name }}"
-          bash .github/scripts/nexus-upload.sh "dist/${{ inputs.package_name }}" "$remote"
           bash .github/scripts/nexus-upload.sh "dist/${{ inputs.package_name }}.sha256" "$remote.sha256"
+          bash .github/scripts/nexus-upload.sh "dist/${{ inputs.package_name }}" "$remote"
           echo "artifact_url=${NEXUS_URL%/}/repository/${NEXUS_REPOSITORY}/$remote" >> "$GITHUB_ENV"
 
       - name: Launch AAP job template

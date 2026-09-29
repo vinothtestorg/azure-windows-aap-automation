@@ -15,6 +15,12 @@ param githubOrg string = 'vinothtestorg'
 @description('GitHub repository name, used for OIDC federation subject.')
 param githubRepo string = 'azure-windows-aap-automation'
 
+@description('Numeric GitHub org/owner ID, required by the immutable OIDC subject format. Read with: gh api repos/<org>/<repo> --jq "{repo_id:.id, owner_id:.owner.id}"')
+param githubOrgId string
+
+@description('Numeric GitHub repository ID, required by the immutable OIDC subject format. Read with: gh api repos/<org>/<repo> --jq "{repo_id:.id, owner_id:.owner.id}"')
+param githubRepoId string
+
 @description('When true, deploys compute modules (Tasks 4 and 5) in addition to the foundation.')
 param deployCompute bool = false
 
@@ -53,6 +59,8 @@ module identity 'modules/identity.bicep' = {
     tags: commonTags
     githubOrg: githubOrg
     githubRepo: githubRepo
+    githubOrgId: githubOrgId
+    githubRepoId: githubRepoId
   }
 }
 
@@ -84,9 +92,12 @@ module appVm 'modules/vm-windows.bicep' = if (deployCompute) {
   }
 }
 
-// Task 5's Nexus deployer reads the app VM's automation credential too, so the
-// app VM's own identity only needs read access to the Nexus reader secret it
-// consumes at configuration time.
+// The app VM only ever downloads release artifacts from Nexus (as
+// svc-win-reader, via demoapp_deploy's fetch task), so its own managed
+// identity needs read access only to nexus-reader-password - never to
+// nexus-deployer-password, which id-gh-deployer's identity already has
+// read access to above (ghDeployerNexusSecretReader), for the GitHub
+// Actions CD workflow that uploads to Nexus.
 module appVmSecret 'modules/secret-reader.bicep' = if (deployCompute) {
   name: 'app-vm-nexus-reader-secret'
   params: {
