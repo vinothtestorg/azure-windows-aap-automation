@@ -92,9 +92,12 @@ module appVm 'modules/vm-windows.bicep' = if (deployCompute) {
   }
 }
 
-// Task 5's Nexus deployer reads the app VM's automation credential too, so the
-// app VM's own identity only needs read access to the Nexus reader secret it
-// consumes at configuration time.
+// The app VM only ever downloads release artifacts from Nexus (as
+// svc-win-reader, via demoapp_deploy's fetch task), so its own managed
+// identity needs read access only to nexus-reader-password - never to
+// nexus-deployer-password, which id-gh-deployer's identity already has
+// read access to above (ghDeployerNexusSecretReader), for the GitHub
+// Actions CD workflow that uploads to Nexus.
 module appVmSecret 'modules/secret-reader.bicep' = if (deployCompute) {
   name: 'app-vm-nexus-reader-secret'
   params: {

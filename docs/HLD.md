@@ -58,7 +58,7 @@ This document describes the design for building, hosting and continuously deploy
 | R8 | Call the CD job template from GitHub Actions with the artifact | [5.7](#57-cd-trigger-github-actions-to-aap), [6](#6-end-to-end-cicd-flow) | `.github/workflows/cd.yml` |
 | R9 | Validate the job template and workflow | [12](#12-observability-and-validation) | `docs/runbooks/validation.md` |
 | R10 | CD design diagram | [4](#4-solution-overview), [6](#6-end-to-end-cicd-flow), [13](#13-target-state-aap-on-azure) | `docs/diagrams/` |
-| R11 | MI-based RBAC for Ansible trigger and run, SP as fallback | [7](#7-identity-and-rbac) | `infra/bicep/modules/identity.bicep`, `infra/bicep/modules/rbac.bicep` |
+| R11 | MI-based RBAC for Ansible trigger and run, SP as fallback | [7](#7-identity-and-rbac) | `infra/bicep/modules/identity.bicep`, `infra/bicep/modules/secret-reader.bicep`, `infra/scripts/create-aap-sp.sh` |
 
 | # | Definition of Done | Evidence |
 |---|---|---|
@@ -68,7 +68,7 @@ This document describes the design for building, hosting and continuously deploy
 | D4 | Ansible job template for CD | `winapp-deploy` job succeeds, `/version` shows the new build |
 | D5 | GitHub Actions CI then CD calling AAP | Push to `main` produces a successful AAP job linked from the run summary |
 | D6 | CD infra and workflow design diagram | This document and `docs/diagrams/` |
-| D7 | Ansible RBAC with MI / SP | Role assignments in Bicep, negative tests in [12.2](#122-validation-plan-r9) |
+| D7 | Ansible RBAC with MI / SP | Key Vault secret-scoped role assignments in Bicep (`secret-reader.bicep`); the SP's own Reader/Key-Vault-Secrets-User role assignments are created by `infra/scripts/create-aap-sp.sh` (idempotent `az role assignment create`, outside Bicep - the SP itself is created outside Bicep too, see [5.2](#52-azure-infrastructure)); negative tests in [12.2](#122-validation-plan-r9) |
 
 ## 3. Assumptions and constraints
 
@@ -119,7 +119,7 @@ flowchart TB
       sp["SP sp-aap-poc<br/>(PoC fallback)"]
     end
     subgraph rg["Resource group rg-winapp-poc"]
-      kv["Key Vault kv-winapp-poc<br/>Nexus, ansible_svc, admin secrets"]
+      kv["Key Vault kv-winapp-poc-afppbe<br/>Nexus, ansible_svc, admin secrets"]
       subgraph vnet["VNet vnet-winapp-poc"]
         subgraph snapp["snet-app + NSG"]
           pip["Public IP + DNS label"]
@@ -161,13 +161,13 @@ flowchart TB
 | Type | ASP.NET MVC 5 web application, target framework .NET Framework 4.7.2 |
 | Projects | `src/DemoApp` (web), `src/DemoApp.Tests` (MSTest or NUnit), `DemoApp.sln` |
 | Endpoints | `/` home page. `/health` returns HTTP 200 with JSON `{"status":"ok"}`. `/version` returns the build version and git SHA. |
-| Version stamping | CI writes the version (`1.0.<run_number>`) and short SHA into `AssemblyInformationalVersion` and a `version.json` file in the package. |
+| Version stamping | CI writes the version (`1.0.<run_number>`) and short SHA into a `version.json` file in the package, which `/version` and `deployments.log` both read (as-built: no `AssemblyInformationalVersion` stamping - see [15.1](#151-as-built-2026-09-28)). |
 | Runtime | Windows Server 2022 ships .NET Framework 4.8, which runs 4.7.2-targeted apps in place. No runtime install needed. |
 | Build | Windows only (MSBuild with web publish targets). Developers on macOS rely on CI to build. The `Microsoft.NETFramework.ReferenceAssemblies` NuGet package pins the 4.7.2 reference assemblies, so the build does not depend on the runner image's targeting packs. |
 
 ### 5.2 Azure infrastructure
 
-Defined in Bicep under `infra/bicep/` (`main.bicep`, `main.bicepparam`, modules `network`, `vm`, `nexus`, `keyvault`, `identity`, `rbac`). Deployed with `az deployment group create` at resource group scope. The resource group itself is created with `az group create`.
+Defined in Bicep under `infra/bicep/` (`main.bicep`, `main.bicepparam`, modules `network`, `keyvault`, `identity`, `secret-reader`, `vm-windows`, `vm-nexus`). Deployed with `az deployment group create` at resource group scope. The resource group itself is created with `az group create`. There is no `rbac` module: Key Vault secret-scoped role assignments are inlined per-secret via `secret-reader.bicep`, and the `sp-aap-poc` service principal's own role assignments are created outside Bicep by `infra/scripts/create-aap-sp.sh` (Entra app/SP objects need the Graph extension, which plain Bicep at this API surface does not have - see [7](#7-identity-and-rbac)).
 
 **Region: East US (verified).** The sandbox gateway resolves to an AWS EC2 address in `us-east-1` (Northern Virginia). Azure East US is also in Virginia, so it is the closest Azure region. PSRP makes several round trips per task, so latency to AAP directly affects job time. East Asia would add about 200 ms to every round trip.
 
@@ -284,9 +284,9 @@ Design rules:
 - **Artifact pull by the VM.** In a `no_log` task, the VM gets a token for `https://vault.azure.net` from IMDS with its system-assigned MI. It reads `nexus-reader-password` and downloads the package from Nexus with basic auth. The password is held in memory only. The controller does not push files over PSRP.
 - **Integrity.** The SHA-256 from CI is checked before anything changes on the VM.
 - **Atomic switch.** IIS always points at `current`. A deployment stops the app pool, repoints the junction, and starts the pool. Downtime is a few seconds. The junction is removed with `cmd /c rmdir`, never with a recursive delete, so the release it points to is not deleted.
-- **Idempotent.** If `releases\<version>` exists and `current` already points at it, the job reports no change.
+- **Idempotent.** If `releases\<version>` exists and `current` already points at it, the switch task itself reports no change (`ok`, not `changed`) and the app pool is left running, untouched. The job as a whole still reports `changed` overall: the deployment record (`deployments.log`) is append-only and is written on every run, and release-retention pruning may also remove old directories beyond the keep count. Confirmed live: V3 ([validation.md](runbooks/validation.md)).
 - **Rollback.** A `block/rescue` restores the previous junction target and recycles the pool when the health check fails, then fails the job. A manual rollback is a relaunch of `winapp-deploy` with an older `app_version`. That package is still in Nexus or already on disk.
-- **Retention.** Keep the last 5 releases on disk.
+- **Retention.** `current` (the release just deployed) and `previous` (the release junction pointed at before this run, if any) are always kept regardless of age. Beyond those two, keep the 5 most-recently-created other release directories (`demoapp_keep_releases`, default 5) and delete the rest - so up to 7 release directories can exist on disk at once, not a flat 5. `.tmp` staging directories from an in-progress expand are never counted or removed by this step.
 
 ### 5.6 CI: GitHub Actions
 
@@ -296,7 +296,7 @@ Design rules:
 |---|---|
 | Triggers | `pull_request` to `main` (build and test only), `push` to `main` or `poc/**` (as-built: also `poc/**`, so each task branch gets CI feedback without needing a PR - see [15.1](#151-as-built-2026-09-28); the `cd` job still runs only on `push` to `main`), `workflow_dispatch` |
 | Runner | `windows-2022` (pinned) |
-| Steps | Checkout, `microsoft/setup-msbuild`, `nuget restore`, `msbuild /p:Configuration=Release /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:publishUrl=out`, tests with `vstest.console`, version stamp, zip `out` to `DemoApp-<version>-<sha7>.zip`, SHA-256, `actions/upload-artifact` |
+| Steps | Checkout, `microsoft/setup-msbuild`, `msbuild /restore` (solution, Release), `dotnet test` on the test project (as-built: `dotnet test`, not `vstest.console` directly - see [15.1](#151-as-built-2026-09-28)), then a second `msbuild /p:DeployOnBuild=true /p:_PackageTempDir=<workspace>\out` publish of the web project (as-built: `_PackageTempDir`, not `WebPublishMethod=FileSystem`/`publishUrl` - the runner's `DeployOnBuild` pipeline stages files into `_PackageTempDir` regardless of publish method, but does not perform the `FileSystem` copy to `publishUrl` on this runner, which would leave `out` empty - see [15.1](#151-as-built-2026-09-28)), version stamp, zip `out` to `DemoApp-<version>-<sha7>.zip`, SHA-256, `actions/upload-artifact` |
 | Outputs | `version`, `package_name`, `sha256` for the CD job |
 | Permissions | `contents: read` |
 
@@ -333,12 +333,12 @@ sequenceDiagram
   participant VM as Windows VM (IIS)
 
   Dev->>GH: push to main (PR runs CI only)
-  GH->>GH: ci.yml: nuget restore, msbuild Release, vstest
+  GH->>GH: ci.yml: msbuild restore+build Release, dotnet test, msbuild publish (_PackageTempDir)
   GH->>GH: zip DemoApp-{version}-{sha}.zip + sha256, upload-artifact
   GH->>Entra: OIDC token, subject repo:vinothtestorg@289159619/azure-windows-aap-automation@1390388831:environment:poc
   Entra-->>GH: access token for UAMI id-gh-deployer
   GH->>KV: get secret nexus-deployer-password
-  GH->>NX: PUT zip and .sha256 as svc-gh-deployer
+  GH->>NX: PUT .sha256 then zip as svc-gh-deployer
   GH->>AAP: POST /api/controller/v2/job_templates/{id}/launch/ with extra_vars
   AAP-->>GH: job id
   Note over GH,AAP: cd.yml polls /api/controller/v2/jobs/{id}/ until finished
@@ -536,7 +536,7 @@ For local work, the AAP variables go in an untracked `.env.aap` file that is lis
 
 - Single VM, stop-switch-start. Expected downtime is a few seconds. Blue/green behind a load balancer is a target-state option.
 - Automatic rollback on a failed health check (see [5.5](#55-ansible-deployment-playbook)).
-- Manual rollback: relaunch `winapp-deploy`, from AAP or through `workflow_dispatch`, with an older version.
+- Manual rollback: **not** a `workflow_dispatch` (no workflow accepts a version input to trigger one - `ci.yml`'s `workflow_dispatch` trigger only reruns a build from the current branch tip). It is a plain relaunch of `winapp-deploy` (from the AAP UI, or `.github/scripts/aap-launch.sh winapp-deploy <vars.json>` from a workstation with a gateway token) with an older version's four survey values (`app_version`, `artifact_url`, `artifact_sha256`, `git_sha` - the same package, still in Nexus or already on disk under `releases\<version>`, since Nexus never deletes a version and the VM keeps the last several under [retention](#55-ansible-deployment-playbook)). See [docs/runbooks/manual-deploy.md](runbooks/manual-deploy.md#manual-rollback) for the step-by-step procedure.
 
 ### 11.3 First manual deployment (R3)
 
@@ -805,6 +805,8 @@ The PoC (P0–P6) is complete: V1–V9 all pass ([runbooks/validation.md](runboo
 | Secrets passed as process arguments | Not addressed in the design | Accepted for the PoC: `az keyvault secret set --value ...`, `curl -u user:pass`, etc. pass secret values as command-line arguments (visible to other processes on the same host for the argv's lifetime, though never logged, printed or committed) | Single-user workstation and ephemeral GitHub-hosted runners only; every script still avoids echoing or writing these values anywhere. Recorded here as a known PoC limitation - the target state (AAP-native or Key Vault-referenced secrets end to end) would remove it. |
 | Key Vault name | `kv-winapp-poc` | `kv-winapp-poc-afppbe` (Bicep appends a 6-character `uniqueString(resourceGroup().id)` suffix for global uniqueness) | Key Vault names are globally unique across Azure; the fixed name from the design was very likely already taken. |
 | `ci.yml` triggers | `push` to `main` only (plus `pull_request` to `main`, `workflow_dispatch`) | Also `push` to `poc/**` ([§5.6](#56-ci-github-actions)) | Gives each task branch CI feedback (build + test) on every push, without needing to open a PR first. The `cd` job's own `if` still gates it to `push` on `main` only, so this adds no deploy paths - cost is extra CI minutes on task branches. |
+| `ci.yml` test runner and publish method | `vstest.console`; `msbuild /p:WebPublishMethod=FileSystem /p:publishUrl=out` | `dotnet test` against `DemoApp.Tests.csproj`; a second `msbuild /p:DeployOnBuild=true /p:_PackageTempDir=<workspace>\out` publish of `DemoApp.csproj` ([§5.6](#56-ci-github-actions)) | `dotnet test` runs an MSTest/NUnit project without installing `vstest.console` separately. On `windows-2022`, `DeployOnBuild`'s file-collection phase always stages the site into `_PackageTempDir`, but does not perform the `FileSystem` copy to `publishUrl` - so `WebPublishMethod=FileSystem`/`publishUrl=out` was inert and left `out` empty; pointing `_PackageTempDir` at `out` directly stages `Web.config`, `Global.asax`, `bin\DemoApp.dll`, etc. correctly. The package step still guards this with an explicit missing-file check. |
+| Version stamping | `AssemblyInformationalVersion` plus `version.json` | `version.json` only ([§5.1](#51-application)) | `AssemblyInformationalVersion` is an assembly-level attribute baked in at compile time from `AssemblyInfo.cs`; stamping it post-build would need an extra MSBuild step (regenerating and recompiling `AssemblyInfo.cs`, or a post-build IL edit) that the PoC did not need - `/version` and `deployments.log` both read the version from `version.json`, which CI writes directly into the package after publish. Kept as a possible later improvement, not a PoC requirement. |
 
 ## 16. Proposed repository layout
 
@@ -821,7 +823,7 @@ azure-windows-aap-automation/
 │   ├── bicep/
 │   │   ├── main.bicep
 │   │   ├── main.bicepparam
-│   │   ├── modules/      network, vm, nexus, keyvault, identity, rbac
+│   │   ├── modules/      network, keyvault, identity, secret-reader, vm-windows, vm-nexus
 │   │   └── scripts/configure-remoting.ps1
 │   └── nexus/            cloud-init.yaml, docker-compose.yml, Caddyfile, bootstrap.sh
 ├── ansible/
@@ -836,7 +838,7 @@ azure-windows-aap-automation/
 ├── docs/
 │   ├── HLD.md
 │   ├── diagrams/         *.mmd sources + rendered *.svg
-│   └── runbooks/         manual-deploy.md, validation.md, teardown.md
+│   └── runbooks/         manual-deploy.md, validation.md, sp-rotation.md, teardown.md
 ├── .gitignore            includes .env.aap
 └── requirement/requirement.md
 ```

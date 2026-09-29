@@ -281,6 +281,43 @@ printed to stdout, a log, or this runbook at any point; only step names,
 public hostnames, version strings, hashes and HTTP status/JSON bodies
 appear above.
 
+## Manual rollback
+
+HLD [§11.2](../HLD.md#112-rollout-and-rollback): there is no `workflow_dispatch`-based
+rollback - no workflow in this repo accepts a version input to redeploy an
+older release (`ci.yml`'s `workflow_dispatch` trigger only reruns a build
+from the current branch tip). A manual rollback is simply **relaunching
+`winapp-deploy` with an older version's four values** - the automatic
+rollback in `demoapp_deploy`'s `block/rescue` already handles a *failed*
+deploy; this is for rolling back a release that deployed successfully but
+is later found to be bad.
+
+1. Pick the version to roll back to. It must still be resolvable: either
+   still present in Nexus (`demoapp-releases` never deletes a version), or
+   already unpacked on the VM under `releases\<version>` (see
+   [retention](../HLD.md#55-ansible-deployment-playbook) - the current and
+   previous releases are always kept, plus up to 5 more recent ones).
+2. Recover that version's four launch values - `app_version`,
+   `artifact_url`, `artifact_sha256`, `git_sha`. The easiest source is a
+   past successful GitHub Actions `cd` run's job summary (version, artifact
+   URL) plus its uploaded `demoapp-package` artifact's `.sha256` file, or
+   the AAP job history for a past `winapp-deploy` launch
+   (`GET /api/controller/v2/jobs/<id>/` → `extra_vars`).
+3. Relaunch, either from the AAP UI (job template `winapp-deploy`, answer
+   the four survey questions), or from a workstation with a gateway token:
+   ```bash
+   set -a; . ./.env.aap; set +a
+   jq -n --arg v "<version>" --arg u "<artifact_url>" --arg s "<artifact_sha256>" --arg g "<git_sha>" \
+     '{app_version:$v, artifact_url:$u, artifact_sha256:$s, git_sha:$g}' > rollback-vars.json
+   bash .github/scripts/aap-launch.sh winapp-deploy rollback-vars.json
+   ```
+   If that exact version is already unpacked on the VM (`releases\<version>\.complete`
+   exists with a checksum matching `artifact_sha256`), the fetch step is
+   skipped and the job only switches the junction, verifies health, and
+   records the deployment - a fast rollback.
+4. Confirm `/health` returns 200 and `/version` reports the rolled-back
+   version.
+
 ## Operational notes
 
 - **`with_timeout` and orphaned `az` child processes.** While gathering the
@@ -301,13 +338,16 @@ appear above.
   that these are transient client-side network stalls, not systemic
   failures). Neither `manual-deploy.sh` nor `manual-deploy.ps1` hit this in
   either full run recorded above (both `az vm run-command invoke` calls for
-  the actual deploy completed in ~64–66s, well inside the 900s bound). This
-  is noted here, not fixed in `lib.sh`, because it's outside this task's
-  scope and only ever manifested on an ad hoc diagnostic call outside the
-  deliverable scripts; if a future task hits a genuinely silent hang past a
-  `with_timeout` bound, check for a leaked `python3 -m azure.cli` process
-  with the same PPID pattern before assuming the timeout helper itself is
-  broken.
+  the actual deploy completed in ~64–66s, well inside the 900s bound). **This
+  was subsequently fixed in `lib.sh` itself**, commit `20f7dde` (fix(infra):
+  process-group timeouts and bounded curl in manual deploy): `with_timeout`
+  now forks the command into its own process group (`setpgrp(0,0)`) and, on
+  timeout, signals the whole group (`TERM`, then `KILL` after a 2s grace) -
+  so a forked-not-exec'd grandchild like this one is killed too, and the
+  calling shell's `out="$(with_timeout ...)"` no longer hangs past the
+  bound. If a future run still hits a silent hang past a `with_timeout`
+  bound, this specific root cause is already handled; look elsewhere first
+  (a hung remote command, not a leaked local process).
 - The repository is public: never commit or paste a secret value from Key
   Vault (`vm-admin-password`, `nexus-deployer-password`,
   `nexus-reader-password`) into a script, a commit, a log file, or this
