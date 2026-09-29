@@ -294,7 +294,7 @@ Design rules:
 
 | Item | Design |
 |---|---|
-| Triggers | `pull_request` to `main` (build and test only), `push` to `main`, `workflow_dispatch` |
+| Triggers | `pull_request` to `main` (build and test only), `push` to `main` or `poc/**` (as-built: also `poc/**`, so each task branch gets CI feedback without needing a PR - see [15.1](#151-as-built-2026-09-28); the `cd` job still runs only on `push` to `main`), `workflow_dispatch` |
 | Runner | `windows-2022` (pinned) |
 | Steps | Checkout, `microsoft/setup-msbuild`, `nuget restore`, `msbuild /p:Configuration=Release /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:publishUrl=out`, tests with `vstest.console`, version stamp, zip `out` to `DemoApp-<version>-<sha7>.zip`, SHA-256, `actions/upload-artifact` |
 | Outputs | `version`, `package_name`, `sha256` for the CD job |
@@ -804,6 +804,7 @@ The PoC (P0–P6) is complete: V1–V9 all pass ([runbooks/validation.md](runboo
 | Release switch and app pool | Not addressed in the design | `switch-release.ps1` stops the IIS app pool, waits (bounded) for it to reach `Stopped`, swaps the `current` junction, then starts the pool again; throws if the pool does not stop | Windows/IIS holds file handles into the active release directory while the pool is running. Swapping the junction without stopping the pool first left a version live whose on-disk files had already been replaced/removed, serving stale or broken content until the next request cycle. |
 | Secrets passed as process arguments | Not addressed in the design | Accepted for the PoC: `az keyvault secret set --value ...`, `curl -u user:pass`, etc. pass secret values as command-line arguments (visible to other processes on the same host for the argv's lifetime, though never logged, printed or committed) | Single-user workstation and ephemeral GitHub-hosted runners only; every script still avoids echoing or writing these values anywhere. Recorded here as a known PoC limitation - the target state (AAP-native or Key Vault-referenced secrets end to end) would remove it. |
 | Key Vault name | `kv-winapp-poc` | `kv-winapp-poc-afppbe` (Bicep appends a 6-character `uniqueString(resourceGroup().id)` suffix for global uniqueness) | Key Vault names are globally unique across Azure; the fixed name from the design was very likely already taken. |
+| `ci.yml` triggers | `push` to `main` only (plus `pull_request` to `main`, `workflow_dispatch`) | Also `push` to `poc/**` ([§5.6](#56-ci-github-actions)) | Gives each task branch CI feedback (build + test) on every push, without needing to open a PR first. The `cd` job's own `if` still gates it to `push` on `main` only, so this adds no deploy paths - cost is extra CI minutes on task branches. |
 
 ## 16. Proposed repository layout
 
