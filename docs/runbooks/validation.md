@@ -20,10 +20,11 @@ match count - never the value.
 | V5 | RBAC negative tests | **PASS** | see sub-table below |
 | V6 | Launch with a wrong `artifact_sha256` | **PASS** | `ansible/tests/deploy-scenarios.sh bad_checksum` |
 | V7 | Launch with an `artifact_url` outside the allowed prefix | **PASS** | `ansible/tests/deploy-scenarios.sh validation` |
+| V7-bis | Launch-time extra_vars cannot override role defaults (I1 fix) | **PASS** | AAP jobs 48 (positive), 51 (negative) |
 | V8 | Upload the same version to Nexus twice | **PASS** | `infra/nexus/tests/smoke.sh` |
 | V9 | Run `winapp-ping` from AAP | **PASS** | AAP job 30 |
 
-**9/9 PASS.**
+**10/10 PASS.**
 
 ---
 
@@ -152,10 +153,17 @@ PLAY RECAP: vm-winapp-01 : ok=14 changed=2 unreachable=0 failed=0 skipped=4
 ```
 
 `ok` (not `changed`) on "Switch current to the new release" means the
-junction already pointed at `1.0.27` and was left untouched; the two
-`changed` tasks are release-retention pruning and the append-only
-`deployments.log` record, both expected on every run. `/version` confirmed
-unchanged at `1.0.27` afterward.
+junction already pointed at `1.0.27` and was left untouched. Of the two
+`changed` tasks, only one is guaranteed on every run: the append-only
+`deployments.log` record, written unconditionally. The other is
+release-retention pruning, which only reports `changed` when there is a
+release directory beyond the keep count to remove (see HLD
+[§5.5](../HLD.md#55-ansible-deployment-playbook)) - it happened to be
+`changed` here because this same validation session's earlier runs had
+already accumulated more than `demoapp_keep_releases` (5) old release
+directories on the VM; a `changed=1` outcome here (deployments.log only,
+nothing to prune) would be equally correct on a quieter VM. `/version`
+confirmed unchanged at `1.0.27` afterward.
 
 **PASS.**
 
@@ -332,6 +340,76 @@ task).
 
 **PASS.**
 
+## V7-bis - Launch-time extra_vars cannot override role defaults (I1 fix)
+
+Date: 2026-09-29. This wave's I1 fix gave `winapp-deploy` a `survey_spec`
+with exactly four required text questions (`app_version` max 32,
+`artifact_url` max 512, `artifact_sha256` min/max 64, `git_sha` max 40) and
+set `ask_variables_on_launch: false`, so AAP now accepts and passes through
+only these four keys at launch and silently drops everything else - closing
+the hole where a token holder could pass `demoapp_allowed_artifact_prefix`
+(to redirect the `svc-win-reader` Nexus credential to an attacker URL) or
+`ansible_host`/`ansible_psrp_*` (to redirect the whole play) as ordinary
+`extra_vars`.
+
+**Positive control - the normal path through the survey still works.**
+`ansible/tests/deploy-scenarios.sh --prepare-only` uploaded a fresh version
+and printed its four values, launched with exactly those four keys via
+`.github/scripts/aap-launch.sh` (unchanged - confirms AAP 2.7 still accepts
+survey answers as `extra_vars` in the launch POST body even with
+`ask_variables_on_launch: false`, because they match survey variable
+names):
+
+```
+$ bash .github/scripts/aap-launch.sh winapp-deploy v7bis-vars.json
+job_id=48
+job_url=.../execution/jobs/playbook/48/output
+AAP job 48 successful
+```
+
+Job 48's recorded `extra_vars` (`GET /api/controller/v2/jobs/48/`) contain
+exactly the four keys sent - `app_version`, `artifact_url`,
+`artifact_sha256`, `git_sha`.
+
+**Negative control - the override is not honoured.** Same four values for
+that now-current version (`1.0.9039`), plus
+`demoapp_allowed_artifact_prefix: https://evil.example.com/` and
+`artifact_url` repointed at `https://evil.example.com/x.zip`:
+
+```
+$ bash .github/scripts/aap-launch.sh winapp-deploy v7bis-negative.json
+job_id=51
+AAP job 51 finished with status failed
+
+TASK [demoapp_deploy : Validate launch variables] ******************************
+fatal: [vm-winapp-01]: FAILED! => {"assertion": "artifact_url.startswith(demoapp_allowed_artifact_prefix)", ...,
+"msg": "Invalid launch variables: app_version, artifact_url (must be under
+https://nexus-winapp-poc.eastus.cloudapp.azure.com/repository/demoapp-releases/),
+artifact_sha256 or git_sha"}
+```
+
+The failure message itself proves the role used its own default prefix
+(`https://nexus-winapp-poc.eastus.cloudapp.azure.com/repository/demoapp-releases/`),
+never the attacker-supplied `https://evil.example.com/` - the override never
+reached the play. Confirmed independently from job 51's own recorded
+`extra_vars` (`GET /api/controller/v2/jobs/51/`):
+
+```json
+{
+  "app_version": "1.0.9039",
+  "artifact_url": "https://evil.example.com/x.zip",
+  "git_sha": "d1ddec8379c4bb7dbd626a8067d72d842f1fa195",
+  "artifact_sha256": "d980275ca0c053c1d94d698aaa9149264b14830b49d6e92ad45c29de83ac7156"
+}
+```
+
+`demoapp_allowed_artifact_prefix` is absent - AAP's survey dropped it before
+the job ever launched, exactly as the fix intends. The live site was
+unaffected: `/version` still returned `1.0.9039` (job 48's release)
+immediately after job 51 failed.
+
+**PASS** (both the positive and negative control).
+
 ## V8 - Upload the same version to Nexus twice
 
 Date: 2026-09-29, `infra/nexus/tests/smoke.sh`:
@@ -364,6 +442,27 @@ verified, still fails the wrapper too (see the commit for
 `.github/scripts/nexus-upload.sh` and its new test,
 `.github/scripts/tests/test-nexus-upload.sh`).
 
+**Upload order (M2 fix, this wave).** `cd.yml`'s "Upload to Nexus" step
+now uploads `<package>.sha256` before `<package>.zip`, not after. The zip's
+own 409-tolerance check works by fetching `<zip-path>.sha256` and comparing
+hashes; if the zip were uploaded first and the workflow then failed before
+the sidecar upload ran, a re-run's zip attempt would 409 against Nexus's
+`ALLOW_ONCE` policy with no sidecar to compare against - a permanent,
+un-recoverable failure, since the zip path can never be overwritten.
+Uploading the sidecar first means a re-run can always tell whether a
+partially-completed upload from a prior attempt matches its own bytes.
+`nexus-upload.sh` itself needed no change: its 409 logic already keys off
+the file's own name (`*.sha256` vs not), not upload order.
+
+**Operator note.** Because Nexus's `ALLOW_ONCE` write policy makes every
+`<version>` path write-once, always use GitHub Actions' **"Re-run failed
+jobs"** (which reuses the same build artifact and the same bytes) to retry
+a failed `cd` run, never **"Re-run all jobs"**. A full re-run rebuilds the
+package from source under the same `${{ github.run_number }}`-derived
+version, producing different bytes (new timestamps inside the zip, etc.)
+for the same path - which 409s against whatever was already uploaded and
+can never be resolved for that version without cutting a new one.
+
 **PASS.**
 
 ## V9 - Run `winapp-ping` from AAP
@@ -391,10 +490,60 @@ immediate retry passed cleanly (`all tests PASSED`). V9's own evidence above
 
 ---
 
+## Fix-wave re-validation (I2, M4) - 2026-09-29
+
+I2 (a failed release switch could leave the site down - `switch-release.ps1`
+wrapped in try/catch with a best-effort restore) and M4 (fetch.yml: record
+the verified checksum in `.complete` and compare it on a relaunch; clean up
+an incomplete release directory before renaming onto it; surface a
+sanitised message on a Nexus download failure) both touch the deploy role's
+happy path and its rescue path, so the full scenario suite - plus a new
+`checksum_drift` scenario for M4(a) - was re-run end to end against the
+live VM (local `ansible-playbook` runs against the working tree, not
+through AAP - the AAP project tracks `main`, so it does not see these
+role changes until a future merge):
+
+```
+$ bash ansible/tests/deploy-scenarios.sh good idempotent checksum_drift bad_checksum unhealthy first_deploy_failure no_secret_leak
+...
+PASS good
+PASS idempotent
+PASS checksum_drift
+PASS bad_checksum
+PASS unhealthy
+PASS first_deploy_failure
+[00:55:09] no_secret_leak: 0 match(es) across 9 captured log(s)
+PASS no_secret_leak
+[00:55:09] all scenarios PASSED
+```
+
+`checksum_drift` (new, M4(a)): relaunches the version `good` just deployed,
+same `artifact_url`, but a different (still valid-format) `artifact_sha256`
+- confirms the play now reads the checksum recorded in `.complete` and
+fails with `checksum mismatch` instead of silently reusing the on-disk
+release, and that `/version` stays unchanged. `unhealthy` and
+`first_deploy_failure` between them exercise `switch-release.ps1`'s normal
+switch, and the role's own `block/rescue` calling `rollback.yml` (which
+re-invokes the same script with `TargetPath` set) - both still pass,
+confirming the I2 try/catch rewrite did not change observable behaviour on
+either path. `pwsh` was not available on the admin workstation to run a
+standalone parse check on `switch-release.ps1`; this live re-run (which
+executes that exact script on the Windows VM via PSRP on every scenario)
+is the stronger check in practice - a syntax error would have failed
+`good` immediately.
+
+Live site left serving `1.0.9045` (`gitSha d1ddec8`), `/health` → 200,
+confirmed after the run.
+
 ## Final state
 
-- `vm-winapp-01` serving `1.0.27` (`gitSha c5961e1`), `/health` → 200.
+- `vm-winapp-01` serving `1.0.9045` (`gitSha d1ddec8`), `/health` → 200 -
+  updated by this fix wave's re-validation above (V1-V9's original
+  `1.0.27` evidence, captured 2026-09-28/29, is unchanged and still holds).
 - AAP project `azure-windows-aap-automation` points at `main`.
-- All temporary branches, PRs, workflow files and tokens created for this
-  validation run have been cleaned up (see the Task 10 report's Cleanup
-  section for the full list).
+- All temporary branches, PRs, workflow files and tokens created for the
+  original validation run have been cleaned up (see the Task 10 report's
+  Cleanup section for the full list). This fix wave created no new
+  branches or PRs; it used disposable Nexus versions (`1.0.90xx`, evicted
+  by retention over time) and two throwaway `winapp-deploy` AAP job
+  launches (48, 51 - see V7-bis).
