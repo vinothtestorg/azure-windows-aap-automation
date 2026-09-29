@@ -35,7 +35,7 @@ fi
 api_get() {
   local tmp
   tmp="$(mktemp)"
-  REPLY_CODE="$(curl -sS -u "admin:$nexus_admin" -o "$tmp" -w '%{http_code}' "$url$1")"
+  REPLY_CODE="$(curl -sS --connect-timeout 15 --max-time 60 -u "admin:$nexus_admin" -o "$tmp" -w '%{http_code}' "$url$1")"
   REPLY_BODY="$(cat "$tmp")"
   rm -f "$tmp"
 }
@@ -45,10 +45,10 @@ api_get() {
 api_send() {
   local method="$1" path="$2" data="${3:-}"
   if [[ -n "$data" ]]; then
-    curl --fail-with-body -sS -u "admin:$nexus_admin" -X "$method" \
+    curl --fail-with-body -sS --connect-timeout 15 --max-time 60 -u "admin:$nexus_admin" -X "$method" \
       -H 'Content-Type: application/json' --data "$data" "$url$path" >/dev/null
   else
-    curl --fail-with-body -sS -u "admin:$nexus_admin" -X "$method" "$url$path" >/dev/null
+    curl --fail-with-body -sS --connect-timeout 15 --max-time 60 -u "admin:$nexus_admin" -X "$method" "$url$path" >/dev/null
   fi
 }
 
@@ -86,7 +86,7 @@ init="$(printf '%s' "$raw" | sed -n '/\[stdout\]/,/\[stderr\]/p' | sed '1d;$d' |
 
 if [[ -n "$init" ]]; then
   tmp="$(mktemp)"
-  pw_code="$(curl -sS -u "admin:$init" -o "$tmp" -w '%{http_code}' -X PUT \
+  pw_code="$(curl -sS --connect-timeout 15 --max-time 60 -u "admin:$init" -o "$tmp" -w '%{http_code}' -X PUT \
     -H 'Content-Type: text/plain' --data-raw "$nexus_admin" \
     "$url/service/rest/v1/security/users/admin/change-password")"
   rm -f "$tmp"
@@ -159,7 +159,7 @@ put_user() { # id role password
     api_send PUT "/service/rest/v1/security/users/$id" \
       "$(jq -n --arg id "$id" --arg role "$role" \
         '{userId:$id,firstName:"svc",lastName:$id,emailAddress:($id+"@example.invalid"),source:"default",status:"active",roles:[$role]}')"
-    curl --fail-with-body -sS -u "admin:$nexus_admin" -X PUT \
+    curl --fail-with-body -sS --connect-timeout 15 --max-time 60 -u "admin:$nexus_admin" -X PUT \
       -H 'Content-Type: text/plain' --data-raw "$password" \
       "$url/service/rest/v1/security/users/$id/change-password" >/dev/null
   fi
