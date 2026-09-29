@@ -57,9 +57,7 @@ gh api -X DELETE "repos/vinothtestorg/azure-windows-aap-automation/environments/
 ## 3. Delete the Azure resource group
 
 ```bash
-source infra/scripts/lib.sh
-require_az_login
-with_timeout 1800 az group delete -n rg-winapp-poc --yes
+bash -c 'source infra/scripts/lib.sh; require_az_login; with_timeout 1800 az group delete -n rg-winapp-poc --yes'
 ```
 
 This is the long step (both VMs, disks, NICs, public IPs, NSGs, VNet, the
@@ -70,9 +68,7 @@ a `Deleted` (recoverable) state for the vault's retention period.
 ## 4. Purge the soft-deleted Key Vault
 
 ```bash
-source infra/scripts/lib.sh
-require_az_login
-with_timeout 120 az keyvault purge -n kv-winapp-poc-afppbe --location eastus
+bash -c 'source infra/scripts/lib.sh; require_az_login; with_timeout 120 az keyvault purge -n kv-winapp-poc-afppbe --location eastus'
 ```
 
 Confirm no other `kv-winapp-poc-*` vaults are left soft-deleted from an
